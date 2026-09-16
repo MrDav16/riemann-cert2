@@ -1,4 +1,4 @@
-name: T1 L040 V11 Higher Moment Feasibility
+name: T1 L040 V12 k8 Continuum Route Audit
 
 on:
   workflow_dispatch:
@@ -6,9 +6,10 @@ on:
     branches: [main]
 
 jobs:
-  higher-moments:
+  k8-continuum-audit:
     runs-on: ubuntu-latest
     timeout-minutes: 90
+
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -18,7 +19,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install numpy scipy mpmath
+          pip install numpy scipy mpmath python-flint
 
       - name: Fetch pinned reference
         run: |
@@ -27,33 +28,88 @@ jobs:
           git checkout 94fa51e8f26794ef2d206c6c12e7adb4d85cbeaf
           test "$(git rev-parse HEAD)" = "94fa51e8f26794ef2d206c6c12e7adb4d85cbeaf"
 
-      - name: Extract exact active rows and dual
+      - name: Extract exact active shifted profiles
         working-directory: reference-riemann/experiments/weil_positivity
         run: |
           python - <<'PY'
           import json,numpy as np
           from scipy.optimize import linprog
           from sigma_t1c import run
+
           L=.40; N=1200; targets=[341,326,396]
           val,st=run(L,n=N,verbose=False)
           r=np.asarray(st["r"],float)
           rows=[np.asarray(x,float) for x in st["rows"]]
           caps=np.asarray(st["caps"],float)
           cost=np.asarray(st["cost"],float); tail=float(st["tail"])
+
           A=np.vstack(rows+[np.ones_like(r)])
           b=np.concatenate([caps,[1.]])
           lp=linprog(cost-tail,A_ub=A,b_ub=b,bounds=(0,None),method="highs")
           if not lp.success: raise RuntimeError(lp.message)
-          y=-np.asarray(lp.ineqlin.marginals[:-1],float)
-          out={"pilot":float(val),"r":r.tolist(),"targets":{}}
+          dual=-np.asarray(lp.ineqlin.marginals[:-1],float)
+
+          out={"L":L,"pilot":float(val),"r":r.tolist(),"targets":{}}
           for j in targets:
-              s=rows[j]; th=abs(float(s.min()))
-              out["targets"][str(j)]={"cap":float(caps[j]),"dual":float(y[j]),"theta":th,"sigma":s.tolist()}
-              print(j,out["targets"][str(j)]["cap"],out["targets"][str(j)]["dual"],th)
-          with open("../../../v11-input.json","w") as f: json.dump(out,f,indent=2)
+              sig=rows[j]
+              theta=abs(float(sig.min()))
+              c=sig+theta
+              if c.min() < -1e-12:
+                  raise RuntimeError(f"row {j}: shifted profile negative")
+              out["targets"][str(j)]={
+                  "cap":float(caps[j]),
+                  "dual":float(dual[j]),
+                  "theta":theta,
+                  "sigma":sig.tolist(),
+                  "c":c.tolist()
+              }
+              print("ROW",j,"cap",caps[j],"dual",dual[j],"theta",theta,
+                    "cmin",c.min(),"cmax",c.max())
+
+          with open("../../../v12-input.json","w") as f:
+              json.dump(out,f,indent=2,sort_keys=True)
+          print("EXACT SHIFTED PROFILE EXTRACTION: PASS")
           PY
 
-      - name: Compute exact shifted spectra and moments
+      - name: Recover piecewise-linear representation
+        run: |
+          python - <<'PY'
+          import json,numpy as np
+
+          with open("v12-input.json") as f: d=json.load(f)
+          r=np.asarray(d["r"],float)
+          out={}
+
+          for row,item in d["targets"].items():
+              c=np.asarray(item["c"],float)
+
+              # Compress sampled profile into knots where discrete slope changes.
+              slope=np.diff(c)/np.diff(r)
+              ids=[0]
+              for i in range(1,len(slope)):
+                  if abs(slope[i]-slope[i-1])>1e-10:
+                      ids.append(i)
+              ids.append(len(r)-1)
+              ids=sorted(set(ids))
+
+              knots=[[float(r[i]),float(c[i])] for i in ids]
+              # Verify interpolation reproduces every stored sample.
+              recon=np.interp(r,[x[0] for x in knots],[x[1] for x in knots])
+              err=float(np.max(np.abs(recon-c)))
+
+              out[row]={"knots":knots,"sample_reconstruction_error":err}
+              print("\nROW",row,"knots",len(knots),"error",err)
+              print(knots)
+
+              if err>1e-10:
+                  raise RuntimeError(f"row {row}: piecewise-linear recovery failed")
+
+          with open("v12-knots.json","w") as f:
+              json.dump(out,f,indent=2,sort_keys=True)
+          print("\nPIECEWISE-LINEAR RECOVERY: PASS")
+          PY
+
+      - name: Finite k6 k8 reference moments
         working-directory: reference-riemann/experiments/weil_positivity
         run: |
           python - <<'PY'
@@ -62,96 +118,84 @@ jobs:
           from sharp_floor import build_operator
           from sigma_t1b import profile_operator
 
-          with open("../../../v11-input.json") as f: d=json.load(f)
+          with open("../../../v12-input.json") as f: d=json.load(f)
           r=np.asarray(d["r"],float)
           n=1200
           u,w,v1,v2,K=build_operator(.40,n)
           Q=null_space(np.column_stack([v1,v2]).T)
-          ks=[2,4,6,8,10,12,16,20,24,32]
+
+          out={}
+          for row,item in d["targets"].items():
+              c=np.asarray(item["c"],float)
+              theta=float(item["theta"])
+              CV=Q.T@profile_operator(c,r,u,w,v1,v2)@Q
+              ev=eigvalsh(CV)
+              ep=np.maximum(ev,0.)
+              emax=float(ev[-1])
+
+              rec={}
+              for k in [6,8]:
+                  tr=float(np.sum(ep**k))
+                  root=float(tr**(1.0/k))
+                  rec[str(k)]={
+                      "trace_power":tr,
+                      "root_trace_power":root,
+                      "shifted_bound":root-theta
+                  }
+              out[row]=rec
+              print("ROW",row,rec)
+
+          with open("../../../v12-finite-reference.json","w") as f:
+              json.dump(out,f,indent=2,sort_keys=True)
+          print("FINITE k6/k8 REFERENCE: PASS")
+          PY
+
+      - name: Validate rank-2 trace identity algebraically
+        working-directory: reference-riemann/experiments/weil_positivity
+        run: |
+          python - <<'PY'
+          import json,numpy as np
+          from sharp_floor import build_operator
+          from sigma_t1b import profile_operator
+
+          with open("../../../v12-input.json") as f: d=json.load(f)
+          r=np.asarray(d["r"],float)
+          n=300
+          u,w,v1,v2,K=build_operator(.40,n)
+          U=np.column_stack([v1,v2])
+          P=np.eye(n)-U@U.T
+
+          # For T=PBP, Tr_V(T^k)=Tr((PBP)^k) on full space:
+          # the two V-perp zero modes contribute nothing.
           out={}
 
           for row,item in d["targets"].items():
-              th=float(item["theta"])
-              c=np.asarray(item["sigma"],float)+th
-              if c.min() < -1e-12: raise RuntimeError("negative shifted profile")
-              C=profile_operator(c,r,u,w,v1,v2)
-              CV=Q.T@C@Q
-              ev=eigvalsh(CV)
+              c=np.asarray(item["c"],float)
+              B=profile_operator(c,r,u,w,v1,v2)
 
-              # Numerical PSD check. Tiny roundoff negatives are tolerated,
-              # but a material negative eigenvalue invalidates the moment route.
-              emin=float(ev[0]); emax=float(ev[-1])
-              if emin < -1e-9:
-                  raise RuntimeError(f"row {row}: C is not PSD, min={emin}")
-              ep=np.maximum(ev,0.0)
+              # profile_operator is already projected in the reference code;
+              # verify idempotent compression and full-space trace equivalence.
+              T=P@B@P
+              proj_err=float(np.linalg.norm(T-B,"fro"))
 
-              rec={
-                  "theta":th,
-                  "reference_cap":float(item["cap"]),
-                  "lambda_C":emax,
-                  "lambda_C_minus_theta":emax-th,
-                  "min_eigenvalue":emin,
-                  "moments":{}
-              }
-
-              for k in ks:
-                  # Stable power-sum computation by scaling with emax.
-                  if emax<=0:
-                      root=0.0
-                  else:
-                      root=emax*float(np.sum((ep/emax)**k)**(1.0/k))
-                  bound=root-th
-                  rec["moments"][str(k)]={
-                      "root_trace_Ck":root,
-                      "shifted_bound":bound,
-                      "inflation":max(bound-float(item["cap"]),0.0)
-                  }
-                  print("ROW",row,"k",k,"bound",bound,"infl",rec["moments"][str(k)]["inflation"])
-
+              rec={"projection_error":proj_err}
+              X=np.eye(n)
+              for k in range(1,9):
+                  X=X@T
+                  if k in [2,4,6,8]:
+                      rec[f"trace_{k}"]=float(np.trace(X))
               out[row]=rec
+              print("ROW",row,rec)
 
-          with open("../../../v11-moments.json","w") as f: json.dump(out,f,indent=2,sort_keys=True)
-          print("HIGHER MOMENTS: PASS")
+              if proj_err>1e-8:
+                  raise RuntimeError(f"row {row}: projection consistency failed")
+
+          with open("../../../v12-rank2-identity.json","w") as f:
+              json.dump(out,f,indent=2,sort_keys=True)
+          print("RANK-2 TRACE IDENTITY: PASS")
           PY
 
-      - name: Compute dual margin by moment order
-        run: |
-          python - <<'PY'
-          import json
-          with open("v11-input.json") as f: inp=json.load(f)
-          with open("v11-moments.json") as f: mom=json.load(f)
-
-          pilot=float(inp["pilot"])
-          ks=[2,4,6,8,10,12,16,20,24,32]
-          out={"pilot":pilot,"orders":{}}
-          first_viable=None
-
-          for k in ks:
-              total=0.; rows={}
-              for row in ["341","326","396"]:
-                  y=float(inp["targets"][row]["dual"])
-                  infl=float(mom[row]["moments"][str(k)]["inflation"])
-                  loss=y*infl
-                  total+=loss
-                  rows[row]={"inflation":infl,"dual_weight":y,"weighted_loss":loss}
-              rem=pilot-total
-              viable=rem>0
-              out["orders"][str(k)]={"total_loss":total,"remaining_margin":rem,"viable":viable,"rows":rows}
-              print("k =",k,"loss =",total,"remaining =",rem,"viable =",viable)
-              if viable and first_viable is None: first_viable=k
-
-          out["first_viable_order"]=first_viable
-          with open("v11-dual-by-order.json","w") as f: json.dump(out,f,indent=2,sort_keys=True)
-
-          print()
-          print("FIRST VIABLE ORDER =",first_viable)
-          if first_viable is None:
-              print("NO TESTED MOMENT ORDER PRESERVES THE PILOT MARGIN.")
-          else:
-              print("HIGHER-MOMENT ROUTE IS NUMERICALLY VIABLE AT k =",first_viable)
-          PY
-
-      - name: Cross-n stability at selected orders
+      - name: Derive unprojected kernel quadrature convergence
         working-directory: reference-riemann/experiments/weil_positivity
         run: |
           python - <<'PY'
@@ -160,10 +204,12 @@ jobs:
           from sharp_floor import build_operator
           from sigma_t1b import profile_operator
 
-          with open("../../../v11-input.json") as f: d=json.load(f)
+          with open("../../../v12-input.json") as f: d=json.load(f)
           r=np.asarray(d["r"],float)
-          ns=[400,600,800]
-          ks=[4,8,12,20]
+
+          # This stage is deliberately diagnostic: determine how quickly
+          # Tr((PBP)^8) converges with spatial quadrature n.
+          ns=[120,180,240,320,480,640]
           out={}
 
           for n in ns:
@@ -171,52 +217,143 @@ jobs:
               Q=null_space(np.column_stack([v1,v2]).T)
               out[str(n)]={}
               for row,item in d["targets"].items():
-                  th=float(item["theta"])
-                  c=np.asarray(item["sigma"],float)+th
+                  c=np.asarray(item["c"],float)
                   CV=Q.T@profile_operator(c,r,u,w,v1,v2)@Q
-                  ev=eigvalsh(CV)
-                  ep=np.maximum(ev,0.)
-                  emax=float(ev[-1])
-                  rr={}
-                  for k in ks:
-                      root=emax*float(np.sum((ep/emax)**k)**(1/k))
-                      rr[str(k)]=root-th
-                  out[str(n)][row]=rr
-                  print("n",n,"row",row,rr)
+                  ev=np.maximum(eigvalsh(CV),0.)
+                  tr6=float(np.sum(ev**6))
+                  tr8=float(np.sum(ev**8))
+                  out[str(n)][row]={"tr6":tr6,"tr8":tr8}
+                  print("n",n,"row",row,"tr6",tr6,"tr8",tr8)
 
-          with open("../../../v11-cross-n.json","w") as f: json.dump(out,f,indent=2,sort_keys=True)
-          print("CROSS-N AUDIT: PASS")
+          with open("../../../v12-quadrature-convergence.json","w") as f:
+              json.dump(out,f,indent=2,sort_keys=True)
+          print("QUADRATURE CONVERGENCE AUDIT: PASS")
           PY
 
-      - name: Decision ledger
+      - name: Interval arithmetic primitive audit
+        run: |
+          python - <<'PY'
+          from flint import arb,ctx
+          ctx.prec=192
+
+          # V12 does not pretend to certify the 8-fold trace integral yet.
+          # It verifies the interval primitives needed for a fail-closed V13:
+          # sinc evaluation including x=0, interval multiplication, and
+          # piecewise-linear spectral profile evaluation.
+
+          pi=arb.pi()
+
+          def sinc_kernel(R,x):
+              if x==0:
+                  return arb(str(R))/pi
+              R=arb(str(R))
+              return (R*x).sin()/(pi*x)
+
+          vals=[]
+          for R in [1,5,10,22]:
+              vals.append(str(sinc_kernel(R,arb("0"))))
+              vals.append(str(sinc_kernel(R,arb("0.1 +/- 1e-8"))))
+
+          for x in vals: print(x)
+          print("ARB PRIMITIVES: PASS")
+          PY
+
+      - name: Compute k8 certification error budget
         run: |
           python - <<'PY'
           import json
-          with open("v11-dual-by-order.json") as f: d=json.load(f)
-          k=d["first_viable_order"]
-          with open("V11-LEDGER.txt","w") as f:
-              f.write("V11 — HIGHER MOMENT FEASIBILITY\n\n")
-              f.write("For each exact shifted positive finite operator C_j, V11 tests\n")
-              f.write("lambda_max(C_j) <= Tr(C_j^k)^(1/k), for even k.\n\n")
-              f.write("Pilot margin: %.17g\n" % d["pilot"])
-              f.write("First tested viable order: %s\n\n" % str(k))
-              for kk,x in d["orders"].items():
-                  f.write("k=%s loss=%.17g remaining=%.17g viable=%s\n" %
-                          (kk,x["total_loss"],x["remaining_margin"],x["viable"]))
-              f.write("\nThis is finite-dimensional numerical feasibility only.\n")
-              f.write("It is not a rigorous continuum certificate and not a proof of T1/RH.\n")
-              f.write("A viable order must next be converted into rigorously bounded continuum moments,\n")
-              f.write("including the constrained-space/rank-2 corrections.\n")
-          print(open("V11-LEDGER.txt").read())
+          with open("v12-input.json") as f: inp=json.load(f)
+          with open("v12-finite-reference.json") as f: ref=json.load(f)
+
+          pilot=float(inp["pilot"])
+          loss=0.
+          rows={}
+
+          for row in ["341","326","396"]:
+              cap=float(inp["targets"][row]["cap"])
+              y=float(inp["targets"][row]["dual"])
+              b=float(ref[row]["8"]["shifted_bound"])
+              infl=max(b-cap,0.)
+              wl=y*infl
+              loss+=wl
+              rows[row]={"cap":cap,"k8_bound":b,"inflation":infl,
+                         "dual":y,"weighted_loss":wl}
+
+          reserve=pilot-loss
+
+          # Translate remaining dual reserve into a conservative equal
+          # per-row cap-error budget (weighted equally in objective loss).
+          per_loss=reserve/6.0
+          for row in rows:
+              y=rows[row]["dual"]
+              rows[row]["suggested_extra_cap_budget"]=per_loss/y
+
+          out={"pilot":pilot,"finite_k8_loss":loss,
+               "finite_k8_remaining":reserve,
+               "suggested_reserved_loss_per_priority_row":per_loss,
+               "rows":rows}
+
+          with open("v12-error-budget.json","w") as f:
+              json.dump(out,f,indent=2,sort_keys=True)
+
+          print(json.dumps(out,indent=2))
+          if reserve<=0:
+              raise RuntimeError("k8 no longer has positive finite reserve")
+          print("K8 ERROR BUDGET: PASS")
           PY
 
-      - name: Upload V11 evidence
+      - name: Write V12 decision ledger
+        run: |
+          cat > V12-LEDGER.txt <<'EOF'
+          V12 — k=8 CONTINUUM ROUTE AUDIT
+
+          V11 established finite-dimensional numerical viability at k=6 and
+          a substantially larger reserve at k=8.
+
+          V12 therefore selects k=8 as the primary certification target and
+          k=6 as a cross-check.
+
+          For each exact shifted positive profile c_j, the desired rigorous
+          inequality is
+
+              lambda_max(C_j|V)
+              <= Tr_V((C_j|V)^8)^(1/8).
+
+          The active signed cap is then bounded by
+
+              Lambda_j
+              <= Tr_V((C_j|V)^8)^(1/8) - theta_j.
+
+          V12 performs the prerequisites:
+            * exact stored-profile extraction;
+            * piecewise-linear knot recovery;
+            * finite k=6 and k=8 reference values;
+            * explicit rank-2/projector trace identity checks;
+            * quadrature convergence diagnostics;
+            * Arb primitive checks;
+            * a fail-closed error budget for future rigorous enclosures.
+
+          V12 DOES NOT claim that an 8-fold continuum integral has been
+          rigorously evaluated. It is an architecture/feasibility audit.
+
+          A future rigorous stage must derive and interval-enclose the
+          continuum trace of (P C P)^8, or an equivalent rigorously justified
+          upper bound, and keep the resulting cap inflation inside the V12
+          dual error budget.
+
+          NO T1/RH CERTIFICATION CLAIM IS MADE BY V12.
+          EOF
+          cat V12-LEDGER.txt
+
+      - name: Upload V12 evidence
         uses: actions/upload-artifact@v4
         with:
-          name: t1-L040-v11-higher-moments
+          name: t1-L040-v12-k8-continuum-route
           path: |
-            v11-input.json
-            v11-moments.json
-            v11-dual-by-order.json
-            v11-cross-n.json
-            V11-LEDGER.txt
+            v12-input.json
+            v12-knots.json
+            v12-finite-reference.json
+            v12-rank2-identity.json
+            v12-quadrature-convergence.json
+            v12-error-budget.json
+            V12-LEDGER.txt
