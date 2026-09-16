@@ -1,4 +1,4 @@
-name: T1 L040 Certification
+name: T1 L040 Dual Extraction
 
 on:
   workflow_dispatch:
@@ -7,12 +7,12 @@ on:
       - main
 
 jobs:
-  certify:
+  dual:
     runs-on: ubuntu-latest
     timeout-minutes: 60
 
     steps:
-      - name: Checkout our repository
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Setup Python
@@ -20,103 +20,295 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install numerical and rigorous tools
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install numpy scipy mpmath python-flint
 
-      - name: Verify Arb / FLINT
+      - name: Verify Arb
         run: |
           python - <<'PY'
           from flint import arb
 
-          x = arb(1) / 3
-          y = 3*x
-
-          print("Arb / FLINT operational")
-          print("1/3 =", x)
-          print("3*(1/3) =", y)
-          print("sin(0.4) =", arb("0.4").sin())
+          x = arb("0.4")
+          print("Arb operational")
+          print("x =", x)
+          print("sin(x) =", x.sin())
           PY
 
-      - name: Fetch reference research code
+      - name: Fetch pinned reference
         run: |
-          git clone --depth 1 \
-            https://github.com/Kuberwastaken/riemann.git \
-            reference-riemann
+          git clone https://github.com/Kuberwastaken/riemann.git reference-riemann
 
-          echo "Reference commit:"
-          git -C reference-riemann rev-parse HEAD
+          cd reference-riemann
 
-          ls reference-riemann/experiments/weil_positivity
+          git checkout 94fa51e8f26794ef2d206c6c12e7adb4d85cbeaf
 
-      - name: Verify T1 source files
-        run: |
-          test -f reference-riemann/experiments/weil_positivity/sigma_t1c.py
-          test -f reference-riemann/experiments/weil_positivity/sharp_floor.py
-          test -f reference-riemann/experiments/weil_positivity/sigma_lp.py
+          echo "PINNED COMMIT:"
+          git rev-parse HEAD
 
-          echo "T1 source files found."
-
-      - name: Projected Hilbert-Schmidt identity test
-        run: |
-          python - <<'PY'
-          import numpy as np
-
-          rng = np.random.default_rng(123456)
-
-          A = rng.normal(size=(40,40))
-          K = (A + A.T)/2
-
-          U,_ = np.linalg.qr(rng.normal(size=(40,2)))
-
-          P = np.eye(40) - U @ U.T
-
-          direct = np.linalg.norm(P @ K @ P, "fro")
-
-          K2 = K @ K
-          M = U.T @ K @ U
-
-          rhs2 = (
-              np.trace(K2)
-              - 2*np.trace(U.T @ K2 @ U)
-              + np.trace(M @ M)
-          )
-
-          formula = np.sqrt(max(rhs2,0))
-
-          print("direct =", direct)
-          print("formula =", formula)
-          print("error =", abs(direct-formula))
-
-          assert abs(direct-formula) < 1e-10
-
-          print("Projected HS identity: PASS")
-          PY
-
-      - name: Run published L=0.40 pilot
+      - name: Run pilot and extract dual
         working-directory: reference-riemann/experiments/weil_positivity
         run: |
-          python sigma_t1c.py 0.40 | tee ../../../t1-L040-pilot.txt
+          python - <<'PY'
+          import json
+          import numpy as np
+          from scipy.optimize import linprog
 
-      - name: Show certification warning
+          from sigma_t1c import run
+
+          L = 0.40
+
+          print("=" * 70)
+          print("RUNNING PINNED T1 PILOT")
+          print("=" * 70)
+
+          val, st = run(L, verbose=True)
+
+          rows = st["rows"]
+          caps = np.asarray(st["caps"], dtype=float)
+          r = np.asarray(st["r"], dtype=float)
+          cost = np.asarray(st["cost"], dtype=float)
+          tail = float(st["tail"])
+
+          print()
+          print("pilot floor =", repr(float(val)))
+          print("number rows =", len(rows))
+
+          A = np.vstack(
+              [np.asarray(row, dtype=float) for row in rows]
+              + [np.ones_like(r)]
+          )
+
+          b = np.concatenate(
+              [caps, np.array([1.0])]
+          )
+
+          result = linprog(
+              cost - tail,
+              A_ub=A,
+              b_ub=b,
+              bounds=(0, None),
+              method="highs",
+          )
+
+          if not result.success:
+              raise RuntimeError(
+                  "Dual LP extraction failed: " + result.message
+              )
+
+          marginals = np.asarray(
+              result.ineqlin.marginals,
+              dtype=float
+          )
+
+          y = -marginals[:-1]
+          y_mass = float(-marginals[-1])
+
+          active = []
+
+          for j, weight in enumerate(y):
+              if weight > 1e-9:
+                  active.append({
+                      "index": int(j),
+                      "dual_weight": float(weight),
+                      "cap_float": float(caps[j]),
+                      "weighted_cap": float(weight * caps[j]),
+                      "row_min": float(np.min(rows[j])),
+                      "row_max": float(np.max(rows[j])),
+                      "signed_row": bool(
+                          np.min(rows[j]) < -1e-12
+                      ),
+                  })
+
+          active.sort(
+              key=lambda z: z["weighted_cap"],
+              reverse=True
+          )
+
+          dual_floor = (
+              tail
+              - y_mass
+              - float(np.dot(y, caps))
+          )
+
+          report = {
+              "L": L,
+              "reference_commit":
+                  "94fa51e8f26794ef2d206c6c12e7adb4d85cbeaf",
+              "pilot_floor": float(val),
+              "dual_floor_float": float(dual_floor),
+              "mass_dual_weight": y_mass,
+              "total_rows": int(len(rows)),
+              "active_rows": int(len(active)),
+              "active_signed_rows": int(
+                  sum(x["signed_row"] for x in active)
+              ),
+              "active": active,
+          }
+
+          with open(
+              "../../../dual-candidate.json",
+              "w"
+          ) as f:
+              json.dump(
+                  report,
+                  f,
+                  indent=2,
+                  sort_keys=True
+              )
+
+          print()
+          print("=" * 70)
+          print("DUAL CANDIDATE")
+          print("=" * 70)
+
+          print("float pilot floor:",
+                f"{val:+.12f}")
+
+          print("float dual floor:",
+                f"{dual_floor:+.12f}")
+
+          print("mass dual weight:",
+                f"{y_mass:.12g}")
+
+          print("total rows:",
+                len(rows))
+
+          print("active rows:",
+                len(active))
+
+          print(
+              "active signed rows:",
+              sum(x["signed_row"] for x in active)
+          )
+
+          print()
+          print("TOP ACTIVE CAPS")
+          print()
+
+          for x in active[:40]:
+              print(
+                  f"row={x['index']:4d} "
+                  f"y={x['dual_weight']:.10g} "
+                  f"cap={x['cap_float']:+.10g} "
+                  f"y*cap={x['weighted_cap']:+.10g} "
+                  f"signed={x['signed_row']} "
+                  f"range=[{x['row_min']:+.4g},"
+                  f"{x['row_max']:+.4g}]"
+              )
+
+          print()
+          print("=" * 70)
+          print("IMPORTANT")
+          print("=" * 70)
+
+          print(
+              "This is a FLOAT dual candidate."
+          )
+
+          print(
+              "It is NOT a rigorous certificate yet."
+          )
+
+          print(
+              "Next step: rigorous Arb upper bounds "
+              "for active caps and continuous "
+              "minorant verification."
+          )
+          PY
+
+      - name: Check dual consistency
         run: |
-          echo "=============================================="
-          echo "IMPORTANT"
-          echo "=============================================="
-          echo "The sigma-LP result above is a FLOAT PILOT."
-          echo "It is NOT a proof."
-          echo ""
-          echo "Arb/FLINT is operational."
-          echo "The reference T1 calculation is reproducible."
-          echo "The projected-HS identity is independently tested."
-          echo ""
-          echo "NEXT:"
-          echo "certify active spectral caps + grid + tail."
-          echo "=============================================="
+          python - <<'PY'
+          import json
 
-      - name: Upload pilot output
+          with open("dual-candidate.json") as f:
+              d = json.load(f)
+
+          p = d["pilot_floor"]
+          q = d["dual_floor_float"]
+
+          gap = abs(p - q)
+
+          print("primal =", p)
+          print("dual   =", q)
+          print("gap    =", gap)
+
+          if gap > 1e-6:
+              raise SystemExit(
+                  "Primal/dual mismatch too large"
+              )
+
+          if d["active_rows"] <= 0:
+              raise SystemExit(
+                  "No active dual rows found"
+              )
+
+          print("FLOAT DUAL CONSISTENCY: PASS")
+          PY
+
+      - name: Generate certification plan
+        run: |
+          python - <<'PY'
+          import json
+
+          with open("dual-candidate.json") as f:
+              d = json.load(f)
+
+          active = d["active"]
+
+          signed = [
+              x for x in active
+              if x["signed_row"]
+          ]
+
+          positive = [
+              x for x in active
+              if not x["signed_row"]
+          ]
+
+          plan = {
+              "positive_rows_for_projected_HS": [
+                  x["index"] for x in positive
+              ],
+              "signed_rows_for_sharp_spectral_bound": [
+                  x["index"] for x in signed
+              ],
+              "positive_count": len(positive),
+              "signed_count": len(signed),
+          }
+
+          with open(
+              "certification-plan.json",
+              "w"
+          ) as f:
+              json.dump(
+                  plan,
+                  f,
+                  indent=2
+              )
+
+          print(
+              "positive active rows:",
+              len(positive)
+          )
+
+          print(
+              "signed active rows:",
+              len(signed)
+          )
+
+          print(
+              "signed row indices:",
+              [x["index"] for x in signed]
+          )
+          PY
+
+      - name: Upload dual candidate
         uses: actions/upload-artifact@v4
         with:
-          name: t1-L040-pilot
-          path: t1-L040-pilot.txt
+          name: t1-L040-dual-candidate
+          path: |
+            dual-candidate.json
+            certification-plan.json
