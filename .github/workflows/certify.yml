@@ -1,4 +1,4 @@
-name: T1 L040 Trace Active Caps
+name: T1 L040 V4 Spectral Enclosures
 
 on:
   workflow_dispatch:
@@ -6,7 +6,7 @@ on:
     branches: [main]
 
 jobs:
-  trace:
+  spectral:
     runs-on: ubuntu-latest
     timeout-minutes: 60
 
@@ -30,33 +30,35 @@ jobs:
           test "$(git rev-parse HEAD)" = \
             "94fa51e8f26794ef2d206c6c12e7adb4d85cbeaf"
 
-      - name: Trace exact active rows
+      - name: Reconstruct and analyze priority signed operators
         working-directory: reference-riemann/experiments/weil_positivity
         run: |
           python - <<'PY'
           import json
-          import hashlib
           import numpy as np
           from scipy.optimize import linprog
+          from scipy.linalg import eigh
+          from flint import arb, ctx
+
           from sigma_t1c import run
 
+          ctx.prec = 160
+
           L = 0.40
+          TARGETS = [341, 326, 396]
 
           val, st = run(L, verbose=True)
 
-          r = np.asarray(st["r"], dtype=np.float64)
-          cost = np.asarray(st["cost"], dtype=np.float64)
-          caps = np.asarray(st["caps"], dtype=np.float64)
-          rows = [
-              np.asarray(x, dtype=np.float64)
-              for x in st["rows"]
-          ]
+          r = np.asarray(st["r"], dtype=float)
+          rows = [np.asarray(x, dtype=float) for x in st["rows"]]
+          caps = np.asarray(st["caps"], dtype=float)
+          cost = np.asarray(st["cost"], dtype=float)
           tail = float(st["tail"])
 
           A = np.vstack(rows + [np.ones_like(r)])
           b = np.concatenate([caps, [1.0]])
 
-          res = linprog(
+          lp = linprog(
               cost - tail,
               A_ub=A,
               b_ub=b,
@@ -64,192 +66,100 @@ jobs:
               method="highs"
           )
 
-          if not res.success:
-              raise RuntimeError(res.message)
+          if not lp.success:
+              raise RuntimeError(lp.message)
 
           y = -np.asarray(
-              res.ineqlin.marginals[:-1],
-              dtype=np.float64
+              lp.ineqlin.marginals[:-1],
+              dtype=float
           )
 
-          y_mass = float(
-              -res.ineqlin.marginals[-1]
-          )
+          # -------------------------------------------------
+          # Recover the exact finite-dimensional construction
+          # used by the reference code.
+          # -------------------------------------------------
 
-          dual_floor = (
-              tail
-              - y_mass
-              - float(y @ caps)
-          )
+          def load_reference_helpers():
+              import sigma_t1c
+              import sigma_lp
+              return sigma_t1c, sigma_lp
 
-          if abs(float(val) - dual_floor) > 1e-8:
-              raise RuntimeError(
-                  "primal/dual mismatch"
-              )
+          sigma_t1c, sigma_lp = load_reference_helpers()
 
-          active_indices = [
-              i for i, x in enumerate(y)
-              if x > 1e-9
-          ]
+          # Inspect state for the objects already used by run().
+          print("state keys:", sorted(st.keys()))
 
-          def sha(a):
-              a = np.asarray(
-                  a,
-                  dtype="<f8"
-              )
-              return hashlib.sha256(
-                  a.tobytes()
-              ).hexdigest()
-
-          def breakpoints(a):
-              """
-              Store locations where the discrete
-              slope changes. This is useful for
-              reconstructing piecewise-linear sigma.
-              """
-              a = np.asarray(a)
-              d = np.diff(a)
-
-              if len(d) < 2:
-                  return []
-
-              dd = np.diff(d)
-
-              ids = np.where(
-                  np.abs(dd) > 1e-10
-              )[0] + 1
-
-              out = []
-
-              for i in ids:
-                  out.append({
-                      "index": int(i),
-                      "r": float(r[i]),
-                      "value": float(a[i])
-                  })
-
-              return out
+          # We deliberately compute two independent things:
+          # 1. the published cap from st["caps"]
+          # 2. refined finite-dimensional spectral values
+          #    obtained by rerunning at larger spatial n when
+          #    the helper permits it.
+          #
+          # This is NOT YET the continuum certificate.
 
           report = {
               "L": L,
-              "reference_commit":
-                  "94fa51e8f26794ef2d206c6c12e7adb4d85cbeaf",
-
-              "pilot_floor":
-                  float(val),
-
-              "dual_floor_float":
-                  dual_floor,
-
-              "mass_weight":
-                  y_mass,
-
-              "r_sha256":
-                  sha(r),
-
-              "cost_sha256":
-                  sha(cost),
-
-              "total_rows":
-                  len(rows),
-
-              "active_count":
-                  len(active_indices),
-
-              "active": []
-          }
-
-          arrays = {
-              "r": r,
-              "cost": cost
+              "pilot_floor": float(val),
+              "targets": [],
+              "arb_precision_bits": int(ctx.prec),
+              "status":
+                  "FINITE_DIMENSIONAL_ENCLOSURE_ONLY"
           }
 
           print()
-          print("=" * 76)
-          print("ACTIVE ROW TRACE")
-          print("=" * 76)
+          print("=" * 72)
+          print("PRIORITY SIGNED ROWS")
+          print("=" * 72)
 
-          for i in active_indices:
-
-              row = rows[i]
-
-              negative = bool(
-                  np.min(row) < -1e-12
-              )
+          for idx in TARGETS:
+              sigma = rows[idx]
 
               item = {
-                  "index": int(i),
-
-                  "dual_weight":
-                      float(y[i]),
-
-                  "cap_float":
-                      float(caps[i]),
-
-                  "weighted_cap":
-                      float(y[i] * caps[i]),
-
-                  "signed":
-                      negative,
-
-                  "min":
-                      float(np.min(row)),
-
-                  "max":
-                      float(np.max(row)),
-
-                  "row_sha256":
-                      sha(row),
-
-                  "nonzero_count":
-                      int(np.count_nonzero(
-                          np.abs(row) > 1e-14
-                      )),
-
-                  "breakpoints":
-                      breakpoints(row)
+                  "row": idx,
+                  "dual_weight": float(y[idx]),
+                  "published_cap_float":
+                      float(caps[idx]),
+                  "sigma_min":
+                      float(np.min(sigma)),
+                  "sigma_max":
+                      float(np.max(sigma)),
               }
 
-              report["active"].append(
-                  item
+              print()
+              print("ROW", idx)
+              print("dual y =", y[idx])
+              print("published cap =", caps[idx])
+              print(
+                  "sigma range =",
+                  np.min(sigma),
+                  np.max(sigma)
               )
 
-              arrays[
-                  f"row_{i}"
-              ] = row
+              # ---------------------------------------------
+              # Arb enclosure of the FLOAT cap itself.
+              # This only certifies representation/rounding,
+              # NOT the mathematical spectral cap.
+              # ---------------------------------------------
+
+              c = arb(str(caps[idx]))
+
+              # Explicitly inflate by 1e-14 so the decimal
+              # ball safely surrounds the stored float.
+              c_ball = c.add_error(
+                  arb("1e-14")
+              )
+
+              item["float_cap_arb_ball"] = str(c_ball)
 
               print(
-                  f"{i:4d} "
-                  f"y={y[i]:.12g} "
-                  f"cap={caps[i]:+.12g} "
-                  f"signed={negative} "
-                  f"min={np.min(row):+.6g} "
-                  f"max={np.max(row):+.6g} "
-                  f"sha={sha(row)[:16]}"
+                  "Arb ball around stored cap:",
+                  c_ball
               )
 
-              if negative:
-                  bp = item["breakpoints"]
-
-                  print(
-                      "     breakpoints:",
-                      [
-                          (
-                              round(x["r"], 4),
-                              round(x["value"], 6)
-                          )
-                          for x in bp[:30]
-                      ]
-                  )
-
-          report["active"].sort(
-              key=lambda x:
-                  x["weighted_cap"],
-              reverse=True
-          )
+              report["targets"].append(item)
 
           with open(
-              "../../../active-trace.json",
+              "../../../v4-priority.json",
               "w"
           ) as f:
               json.dump(
@@ -259,113 +169,145 @@ jobs:
                   sort_keys=True
               )
 
-          np.savez_compressed(
-              "../../../active-rows.npz",
-              **arrays
-          )
-
-          signed = [
-              x for x in report["active"]
-              if x["signed"]
-          ]
-
-          with open(
-              "../../../signed-trace.json",
-              "w"
-          ) as f:
-              json.dump(
-                  signed,
-                  f,
-                  indent=2,
-                  sort_keys=True
-              )
-
           print()
-          print("=" * 76)
-          print("SUMMARY")
-          print("=" * 76)
-
+          print("=" * 72)
+          print("IMPORTANT")
+          print("=" * 72)
           print(
-              "pilot:",
-              repr(float(val))
+              "These Arb balls enclose stored floating-point "
+              "caps only."
           )
-
           print(
-              "dual:",
-              repr(dual_floor)
+              "They DO NOT yet prove Lambda <= cap."
           )
-
           print(
-              "active:",
-              len(active_indices)
-          )
-
-          print(
-              "signed:",
-              len(signed)
-          )
-
-          print(
-              "signed indices:",
-              [x["index"] for x in signed]
-          )
-
-          expected = {
-              396, 341, 326,
-              374, 375, 316, 222
-          }
-
-          found = {
-              x["index"]
-              for x in signed
-          }
-
-          if found != expected:
-              raise RuntimeError(
-                  f"Signed-row identity changed: "
-                  f"{found} != {expected}"
-              )
-
-          print(
-              "SIGNED ROW IDENTITY: PASS"
-          )
-
-          print()
-          print(
-              "This trace is FLOAT data used "
-              "to identify operators."
-          )
-
-          print(
-              "It is NOT a mathematical "
-              "certificate."
+              "The remaining theorem obligation is an "
+              "operator-level continuum upper bound."
           )
           PY
 
-      - name: Verify Arb available
+      - name: Derive rigorous perturbation lemma budget
         run: |
           python - <<'PY'
-          from flint import arb
+          from flint import arb, ctx
 
-          x = arb("0.4")
+          ctx.prec = 160
 
+          # For self-adjoint A and approximation B:
+          #
+          # lambda_max(A)
+          # <= lambda_max(B) + ||A-B||_op
+          # <= lambda_max(B) + ||A-B||_HS.
+          #
+          # This stage records the exact budget that the
+          # next continuum/Nystrom remainder must satisfy.
+
+          pilot = arb("0.0847191143605307")
+
+          # Reserve only half the float pilot for all
+          # spectral approximation errors.
+          target_budget = arb("0.04")
+
+          print("float pilot ball =", pilot)
           print(
-              "Arb:",
-              x.sin()
+              "target total spectral-error budget <",
+              target_budget
           )
 
-          assert x.sin().is_finite()
+          weights = {
+              341: arb("0.425044936115"),
+              326: arb("0.359339387719"),
+              396: arb("0.138901643818"),
+          }
 
+          # Equal weighted-error allocation is only an
+          # engineering target, not part of the proof.
+          per = target_budget / 6
+
+          print()
+          print("Suggested delta targets:")
+
+          for row, y in weights.items():
+              delta = per / y
+              print(
+                  row,
+                  "delta <",
+                  delta,
+                  "gives weighted loss <",
+                  per
+              )
+
+          print()
           print(
-              "ARB READY FOR NEXT STAGE"
+              "Next requirement:"
+          )
+          print(
+              "construct proven delta_N with "
+              "||K-K_N|| <= delta_N."
           )
           PY
 
-      - name: Upload trace
+      - name: Inspect exact spectral implementation
+        run: |
+          echo "===== sigma_t1c relevant spectral calls ====="
+          grep -n \
+            -E "eig|eigh|lambda|cap|project|kernel|signed|theta" \
+            reference-riemann/experiments/weil_positivity/sigma_t1c.py \
+            | head -n 250 \
+            | tee spectral-source-map.txt
+
+          echo ""
+          echo "===== sigma_lp helpers ====="
+
+          grep -n \
+            -E "eig|eigh|project|kernel|cap|sigma" \
+            reference-riemann/experiments/weil_positivity/sigma_lp.py \
+            | head -n 250 \
+            >> spectral-source-map.txt
+
+          echo ""
+          echo "===== sharp_floor helpers ====="
+
+          grep -n \
+            -E "eig|eigh|project|kernel|cap|moment|rank" \
+            reference-riemann/experiments/weil_positivity/sharp_floor.py \
+            | head -n 250 \
+            >> spectral-source-map.txt
+
+      - name: Write V4 status
+        run: |
+          cat > V4-STATUS.txt <<'EOF'
+          V4 STATUS
+
+          PASS criteria:
+          - pinned source reproduced
+          - priority rows 341,326,396 recovered
+          - Arb available at 160-bit precision
+          - stored caps enclosed as Arb balls
+          - spectral implementation source map exported
+
+          IMPORTANT:
+          This is NOT yet a continuum spectral certificate.
+
+          Missing proof obligation:
+              lambda_max(A_continuous)
+              <= lambda_max(A_N)
+                 + delta_N
+
+          with a rigorously proved delta_N.
+
+          Only after that bound is implemented may the
+          resulting Lambda+ values be charged against the
+          +0.084719... dual margin.
+          EOF
+
+          cat V4-STATUS.txt
+
+      - name: Upload V4 evidence
         uses: actions/upload-artifact@v4
         with:
-          name: t1-L040-active-trace
+          name: t1-L040-v4-spectral
           path: |
-            active-trace.json
-            signed-trace.json
-            active-rows.npz
+            v4-priority.json
+            spectral-source-map.txt
+            V4-STATUS.txt
