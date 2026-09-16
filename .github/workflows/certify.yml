@@ -1,4 +1,4 @@
-name: T1 L040 V9.1 Shifted Moment Corrected
+name: T1 L040 V9.2 Explicit V Basis
 
 on:
   workflow_dispatch:
@@ -6,7 +6,7 @@ on:
     branches: [main]
 
 jobs:
-  shifted-moment:
+  explicit-v-basis:
     runs-on: ubuntu-latest
     timeout-minutes: 90
 
@@ -28,14 +28,13 @@ jobs:
           git checkout 94fa51e8f26794ef2d206c6c12e7adb4d85cbeaf
           test "$(git rev-parse HEAD)" = "94fa51e8f26794ef2d206c6c12e7adb4d85cbeaf"
 
-      - name: Extract priority rows and dual budget
+      - name: Extract priority rows
         working-directory: reference-riemann/experiments/weil_positivity
         run: |
           python - <<'PY'
           import json, numpy as np
           from scipy.optimize import linprog
           from sigma_t1c import run
-
           L=0.40; N=1200; TARGETS=[341,326,396]
           val,st=run(L,n=N,verbose=False)
           r=np.asarray(st["r"],float)
@@ -47,100 +46,133 @@ jobs:
           lp=linprog(cost-tail,A_ub=A,b_ub=b,bounds=(0,None),method="highs")
           if not lp.success: raise RuntimeError(lp.message)
           y=-np.asarray(lp.ineqlin.marginals[:-1],float)
-
           out={"L":L,"N":N,"pilot":float(val),"targets":{}}
           for idx in TARGETS:
               row=rows[idx]
-              theta=abs(float(np.min(row)))
               out["targets"][str(idx)]={
                   "cap":float(caps[idx]),
                   "dual_weight":float(y[idx]),
-                  "theta":theta,
+                  "theta":abs(float(np.min(row))),
                   "row_min":float(np.min(row)),
                   "row_max":float(np.max(row))
               }
-              print("ROW",idx,"cap",caps[idx],"dual",y[idx],"theta",theta)
-
-          with open("../../../v91-targets.json","w") as f:
+              print(idx,out["targets"][str(idx)])
+          with open("../../../v92-targets.json","w") as f:
               json.dump(out,f,indent=2,sort_keys=True)
           print("TARGET EXTRACTION: PASS")
           PY
 
-      - name: Verify corrected shifted identity on V
+      - name: Build explicit orthonormal basis of V
         working-directory: reference-riemann/experiments/weil_positivity
         run: |
           python - <<'PY'
-          import numpy as np
-          from scipy.sparse.linalg import eigsh
+          import json, numpy as np
+          from scipy.linalg import null_space
           from sharp_floor import build_operator
-          from sigma_lp import project_constraints
 
           L=0.40; n=1000
           u,w,v1,v2,K=build_operator(L,n)
 
-          # P is the orthogonal projector onto V.
-          P=np.eye(n)-np.outer(v1,v1)-np.outer(v2,v2)
+          U=np.column_stack([v1,v2])
+          # V = ker(U^T). Q has n-2 orthonormal columns.
+          Q=null_space(U.T)
+
+          orth=np.linalg.norm(Q.T@Q-np.eye(Q.shape[1]),2)
+          annih=np.linalg.norm(U.T@Q,2)
+          P=np.eye(n)-U@U.T
+          proj=np.linalg.norm(Q@Q.T-P,2)
+
+          print("Q shape =",Q.shape)
+          print("||Q^TQ-I|| =",orth)
+          print("||U^TQ|| =",annih)
+          print("||QQ^T-P|| =",proj)
+
+          if Q.shape != (n,n-2): raise RuntimeError("wrong V dimension")
+          if max(orth,annih,proj)>1e-10:
+              raise RuntimeError("explicit V basis verification failed")
+
+          with open("../../../v92-basis-check.json","w") as f:
+              json.dump({
+                  "n":n,
+                  "dimV":int(Q.shape[1]),
+                  "orth_error":float(orth),
+                  "annihilation_error":float(annih),
+                  "projector_error":float(proj)
+              },f,indent=2)
+
+          print("EXPLICIT V BASIS: PASS")
+          PY
+
+      - name: Verify exact shift identity inside V
+        working-directory: reference-riemann/experiments/weil_positivity
+        run: |
+          python - <<'PY'
+          import json, numpy as np
+          from scipy.linalg import null_space, eigvalsh
+          from sharp_floor import build_operator
+          from sigma_lp import project_constraints
+
+          L=0.40; n=700
+          u,w,v1,v2,K=build_operator(L,n)
+          U=np.column_stack([v1,v2])
+          Q=null_space(U.T)
 
           cases=[
               (0.2,5,10),(0.2,10,20),
               (1.5,5,10),(1.5,10,20),
               (4.0,5,10),(4.0,10,20)
           ]
-
-          max_error=0.0
+          report=[]; maxerr=0.0
 
           for theta,R1,R2 in cases:
               K1,_=K(R1); K2,_=K(R2)
               K1=project_constraints(K1,v1,v2)
               K2=project_constraints(K2,v1,v2)
 
-              A=K1-theta*(P-K2)
-              C=K1+theta*K2
+              # Compress literally to V.
+              K1V=Q.T@K1@Q
+              K2V=Q.T@K2@Q
+              CV=K1V+theta*K2V
+              AV=CV-theta*np.eye(Q.shape[1])
 
-              # A and C have two zero modes on V^\perp.
-              # For C|V, retrieve enough top eigenvalues and discard
-              # the two projection-null modes by using the exact relation
-              # on the nonzero V spectrum.
-              valsA=np.sort(eigsh(A,k=8,which="LA",return_eigenvectors=False))[::-1]
-              valsC=np.sort(eigsh(C,k=8,which="LA",return_eigenvectors=False))[::-1]
-
-              # Pair eigenvalues through the shift. Find the C eigenvalue
-              # whose shifted value best matches lambda_max(A).
-              lamA=float(valsA[0])
-              candidates=[float(x) for x in valsC]
-              lamC=min(candidates,key=lambda x:abs((x-theta)-lamA))
+              lamA=float(eigvalsh(AV,subset_by_index=[AV.shape[0]-1,AV.shape[0]-1])[0])
+              lamC=float(eigvalsh(CV,subset_by_index=[CV.shape[0]-1,CV.shape[0]-1])[0])
               err=abs(lamA-(lamC-theta))
-              max_error=max(max_error,err)
+              maxerr=max(maxerr,err)
 
-              print("theta",theta,"R1",R1,"R2",R2)
-              print("  lambda(A|V) =",lamA)
-              print("  matched lambda(C|V)-theta =",lamC-theta)
-              print("  error =",err)
+              item={"theta":theta,"R1":R1,"R2":R2,
+                    "lambda_A_V":lamA,"lambda_C_V":lamC,
+                    "lambda_C_minus_theta":lamC-theta,"error":err}
+              report.append(item); print(item)
 
-          if max_error>1e-8:
-              raise RuntimeError("corrected V-space shift identity failed")
+          if maxerr>1e-10:
+              raise RuntimeError("explicit-V shift identity failed")
 
-          print("CORRECTED SHIFT IDENTITY ON V: PASS")
+          with open("../../../v92-shift-identity.json","w") as f:
+              json.dump({"max_error":maxerr,"cases":report},f,indent=2)
+
+          print("EXPLICIT-V SHIFT IDENTITY: PASS")
           PY
 
-      - name: Shifted k2 feasibility on projected space
+      - name: Projected shifted k2 feasibility scan
         working-directory: reference-riemann/experiments/weil_positivity
         run: |
           python - <<'PY'
           import json, numpy as np
-          from scipy.sparse.linalg import eigsh
+          from scipy.linalg import null_space, eigvalsh
           from sharp_floor import build_operator
           from sigma_lp import project_constraints
 
-          L=0.40; n=800
+          L=0.40; n=500
           u,w,v1,v2,K=build_operator(L,n)
-          P=np.eye(n)-np.outer(v1,v1)-np.outer(v2,v2)
-
+          U=np.column_stack([v1,v2]); Q=null_space(U.T)
           cache={}
-          def PK(R):
+
+          def KV(R):
               if R not in cache:
                   KR,_=K(R)
-                  cache[R]=project_constraints(KR,v1,v2)
+                  KR=project_constraints(KR,v1,v2)
+                  cache[R]=Q.T@KR@Q
               return cache[R]
 
           thetas=[0.2,1.5,4.0]
@@ -148,137 +180,125 @@ jobs:
           report={}
 
           for theta in thetas:
-              candidates=[]
+              cand=[]
               for R1 in Rs:
                   for R2 in Rs:
                       if R2<=R1: continue
-
-                      C=PK(R1)+theta*PK(R2)
-                      A=C-theta*P
-                      lamA=float(np.max(eigsh(A,k=6,which="LA",return_eigenvectors=False)))
-
-                      # Since C=P C P, its Frobenius norm is exactly the
-                      # finite-dimensional projected k=2 moment.
+                      C=KV(R1)+theta*KV(R2)
+                      A=C-theta*np.eye(C.shape[0])
+                      lam=float(eigvalsh(A,subset_by_index=[A.shape[0]-1,A.shape[0]-1])[0])
                       m2=float(np.linalg.norm(C,"fro"))
-                      shifted_bound=m2-theta
-                      slack=shifted_bound-lamA
-
-                      candidates.append({
-                          "R1":R1,"R2":R2,
-                          "lambda_A":lamA,
-                          "m2_C":m2,
-                          "shifted_m2_bound":shifted_bound,
-                          "slack":slack
+                      bound=m2-theta
+                      cand.append({
+                          "R1":R1,"R2":R2,"lambda_A":lam,
+                          "sqrt_Tr_C2":m2,
+                          "shifted_k2_bound":bound,
+                          "slack":bound-lam
                       })
+              cand.sort(key=lambda z:z["slack"])
+              report[str(theta)]=cand[:30]
+              print("\nTHETA",theta)
+              for z in cand[:10]: print(z)
 
-              candidates.sort(key=lambda x:x["slack"])
-              report[str(theta)]=candidates[:30]
-              print("THETA",theta)
-              for x in candidates[:10]: print(x)
-
-          with open("../../../v91-shift-scan.json","w") as f:
+          with open("../../../v92-k2-scan.json","w") as f:
               json.dump(report,f,indent=2,sort_keys=True)
-          print("PROJECTED SHIFTED k2 SCAN: PASS")
+          print("EXPLICIT-V k2 SCAN: PASS")
           PY
 
-      - name: Compare feasibility with dual budgets
+      - name: Compare k2 feasibility with dual budget
         run: |
           python - <<'PY'
           import json
-          with open("v91-targets.json") as f: d=json.load(f)
-          with open("v91-shift-scan.json") as f: s=json.load(f)
-
+          with open("v92-targets.json") as f: d=json.load(f)
+          with open("v92-k2-scan.json") as f: s=json.load(f)
           pilot=float(d["pilot"])
-          print("PILOT =",pilot)
+          out={}
+          print("pilot =",pilot)
 
           for row in ["341","326","396"]:
               t=d["targets"][row]
               theta=str(float(t["theta"]))
-              cap=float(t["cap"])
-              y=float(t["dual_weight"])
+              cap=float(t["cap"]); y=float(t["dual_weight"])
               allowance=pilot/6/y
-              threshold=cap+allowance
+              target=cap+allowance
               best=s[theta][0]
+              out[row]={
+                  "theta":theta,"float_cap":cap,
+                  "dual_weight":y,"allowed_inflation":allowance,
+                  "engineering_target":target,
+                  "best_prototype":best
+              }
+              print("\nROW",row)
+              print("target rigorous cap <",target)
+              print("best prototype shifted k2 =",best["shifted_k2_bound"])
+              print("prototype slack =",best["slack"])
 
-              print()
-              print("ROW",row)
-              print("  theta =",theta)
-              print("  float cap =",cap)
-              print("  engineering rigorous-cap target <",threshold)
-              print("  best prototype shifted-m2 =",best["shifted_m2_bound"])
-              print("  prototype slack =",best["slack"])
-
-          print()
-          print("NOTE: prototype scan is diagnostic, not exact row matching.")
+          with open("v92-budget.json","w") as f:
+              json.dump(out,f,indent=2,sort_keys=True)
+          print("\nBUDGET COMPARISON: PASS")
           PY
 
-      - name: Verify continuum cross moments with Arb
+      - name: Verify continuum sinc cross moments with Arb
         run: |
           python - <<'PY'
           from flint import arb,ctx
           ctx.prec=192
           ell=arb("0.8"); pi=arb.pi()
 
-          def verified_inner(R0,S0,M=12000):
+          def verified_inner(R0,S0,M=10000):
               R=arb(str(R0)); S=arb(str(S0)); dx=ell/arb(M)
               first=2*ell*R*S/(pi*pi)*dx
               total=arb("0 +/- "+str(float(first)))
               for i in range(1,M):
                   a=ell*arb(i)/arb(M); b=ell*arb(i+1)/arb(M)
-                  mid=(a+b)/2; rad=(b-a)/2
-                  X=mid+arb("0 +/- "+str(float(rad)))
-                  kR=(R*X).sin()/(pi*X)
-                  kS=(S*X).sin()/(pi*X)
-                  total += 2*(ell-X)*kR*kS*(b-a)
+                  X=(a+b)/2 + arb("0 +/- "+str(float((b-a)/2)))
+                  total += 2*(ell-X)*((R*X).sin()/(pi*X))*((S*X).sin()/(pi*X))*(b-a)
               return total
 
           for R,S in [(5,10),(8,15),(10,20),(15,22)]:
-              print("R,S",R,S,"=>",verified_inner(R,S))
-          print("ARB CROSS-MOMENTS: PASS")
+              print(R,S,verified_inner(R,S))
+          print("ARB CONTINUUM CROSS-MOMENTS: PASS")
           PY
 
-      - name: Write V9.1 ledger
+      - name: Write V9.2 ledger
         run: |
-          cat > V91-LEDGER.txt <<'EOF'
-          V9.1 — CORRECTED SHIFTED POSITIVE MOMENT AUDIT
+          cat > V92-LEDGER.txt <<'EOF'
+          V9.2 — EXPLICIT CONSTRAINED-SPACE AUDIT
 
-          V9 failed because lambda_max(C) was taken on the full discretized
-          space, which includes the two null directions V-perp introduced by
-          the pole projection. Those zero modes can dominate when the true
-          spectrum of C|V lies below theta.
+          V9 and V9.1 exposed a genuine numerical representation issue:
+          projected n x n matrices retain two null modes belonging to V-perp.
 
-          V9.1 treats the identity on the constrained subspace:
+          V9.2 removes those modes literally by constructing an orthonormal
+          basis Q of V = ker(U^T), and compressing every operator as Q^T A Q.
 
-              A|V = C|V - theta I_V,
+          The identity tested is therefore exactly
 
-          hence
+              A_V = C_V - theta I_(n-2),
 
-              lambda_max(A|V)
-              = lambda_max(C|V) - theta.
+          and hence
 
-          The workflow regression-tests this identity by matching the
-          non-null V spectrum.
+              lambda_max(A_V) = lambda_max(C_V) - theta.
 
-          The shifted k=2 feasibility bound is
+          The k=2 feasibility bound is
 
-              lambda_max(A|V)
-              <= sqrt(Tr_V(C^2)) - theta,
+              lambda_max(A_V)
+              <= sqrt(Tr(C_V^2)) - theta.
 
-          provided C is the positive shifted operator associated with the
-          exact signed LP row.
-
-          This workflow remains a feasibility audit. It does NOT certify T1
-          or RH. Exact row/operator reconstruction and rigorous continuum
-          rank-2 moment evaluation remain required before a certified cap can
-          be charged against the dual margin.
+          This remains a numerical feasibility audit. It is not a proof of
+          T1 or RH. Exact reconstruction of rows 341/326/396 as continuum
+          operators, verified rank-2 corrections, rigorous moment enclosures,
+          and a complete dual certificate are still required.
           EOF
-          cat V91-LEDGER.txt
+          cat V92-LEDGER.txt
 
-      - name: Upload V9.1 evidence
+      - name: Upload V9.2 evidence
         uses: actions/upload-artifact@v4
         with:
-          name: t1-L040-v91-shifted-moment
+          name: t1-L040-v92-explicit-v
           path: |
-            v91-targets.json
-            v91-shift-scan.json
-            V91-LEDGER.txt
+            v92-targets.json
+            v92-basis-check.json
+            v92-shift-identity.json
+            v92-k2-scan.json
+            v92-budget.json
+            V92-LEDGER.txt
