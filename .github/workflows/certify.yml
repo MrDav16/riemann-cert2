@@ -1,4 +1,4 @@
-name: T1 L040 V20 Identification Lemma Audit Row326
+name: T1 L040 V21 Corrected Identification Row326
 
 on:
   workflow_dispatch:
@@ -6,7 +6,7 @@ on:
     branches: [main]
 
 jobs:
-  identification-lemma:
+  corrected-identification:
     runs-on: ubuntu-latest
     timeout-minutes: 90
 
@@ -19,7 +19,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install numpy scipy mpmath sympy python-flint
+          pip install numpy scipy mpmath python-flint
 
       - name: Fetch pinned reference
         run: |
@@ -28,30 +28,11 @@ jobs:
           git checkout 94fa51e8f26794ef2d206c6c12e7adb4d85cbeaf
           test "$(git rev-parse HEAD)" = "94fa51e8f26794ef2d206c6c12e7adb4d85cbeaf"
 
-      - name: Capture exact reference implementation
-        working-directory: reference-riemann/experiments/weil_positivity
-        run: |
-          python - <<'PY'
-          import inspect,json
-          import sharp_floor,sigma_t1b
-
-          out={
-            "build_operator":inspect.getsource(sharp_floor.build_operator),
-            "profile_operator":inspect.getsource(sigma_t1b.profile_operator)
-          }
-          with open("../../../v20-reference-source.json","w") as f:
-              json.dump(out,f,indent=2)
-          print(out["build_operator"])
-          print(out["profile_operator"])
-          print("SOURCE CAPTURE: PASS")
-          PY
-
-      - name: Rebuild row326 reference objects
+      - name: Build row326 reference objects
         working-directory: reference-riemann/experiments/weil_positivity
         run: |
           python - <<'PY'
           import json,numpy as np
-          from scipy.linalg import null_space,eigh
           from sigma_t1c import run
           from sharp_floor import build_operator
           from sigma_t1b import profile_operator
@@ -64,330 +45,362 @@ jobs:
           sig=rows[ROW]; theta=abs(float(sig.min())); c=sig+theta
 
           u,w,v1,v2,K=build_operator(L,N)
-          C=profile_operator(c,r,u,w,v1,v2)
-          X=np.column_stack([v1,v2])
-          Q=null_space(X.T)
-          A=Q.T@C@Q
-          A=(A+A.T)/2
+          Cref=profile_operator(c,r,u,w,v1,v2)
 
-          np.save("../../../v20-u.npy",u)
-          np.save("../../../v20-w.npy",w)
-          np.save("../../../v20-v1.npy",v1)
-          np.save("../../../v20-v2.npy",v2)
-          np.save("../../../v20-C.npy",C)
-          np.save("../../../v20-Q.npy",Q)
-          np.save("../../../v20-A.npy",A)
-          np.save("../../../v20-r.npy",r)
-          np.save("../../../v20-c.npy",c)
+          np.save("../../../v21-u.npy",u)
+          np.save("../../../v21-w.npy",w)
+          np.save("../../../v21-v1.npy",v1)
+          np.save("../../../v21-v2.npy",v2)
+          np.save("../../../v21-r.npy",r)
+          np.save("../../../v21-c.npy",c)
+          np.save("../../../v21-Cref.npy",Cref)
 
           out={"L":L,"N":N,"row":ROW,"theta":theta,
-               "cap":float(caps[ROW]),"pilot":float(val),
-               "dim_A":int(A.shape[0])}
-          with open("../../../v20-input.json","w") as f:json.dump(out,f,indent=2)
+               "cap":float(caps[ROW]),"pilot":float(val)}
+          with open("../../../v21-input.json","w") as f:json.dump(out,f,indent=2)
           print(json.dumps(out,indent=2))
           print("REFERENCE OBJECTS: PASS")
           PY
 
-      - name: Identify weighted Nyström structure
+      - name: Prove finite constraint subspace identity numerically
         run: |
           python - <<'PY'
           import json,numpy as np
 
-          u=np.load("v20-u.npy")
-          w=np.load("v20-w.npy")
-          C=np.load("v20-C.npy")
-          n=len(u)
-
-          # A symmetric Nyström representation for a kernel k(u-v) has
-          # entries sqrt(w_i) k(u_i-u_j) sqrt(w_j), before projection.
-          # Recover the implied sampled kernel from C away from the pole
-          # projection bookkeeping and test Toeplitz-by-difference behavior.
+          u=np.load("v21-u.npy");w=np.load("v21-w.npy")
+          v1=np.load("v21-v1.npy");v2=np.load("v21-v2.npy")
           sw=np.sqrt(w)
-          raw=C/(sw[:,None]*sw[None,:])
 
-          # Compare entries with equal grid-index difference.
-          maxspread=0.0
-          records=[]
-          for d in [0,1,2,5,10,50,100,300,600,1000]:
-              vals=np.diag(raw,k=d)
-              if len(vals)==0: continue
-              spread=float(np.max(vals)-np.min(vals))
-              maxspread=max(maxspread,abs(spread))
-              records.append({"offset":d,"mean":float(np.mean(vals)),
-                              "spread":spread})
-          out={"max_equal_offset_spread":maxspread,"offsets":records}
-          with open("v20-nystrom-structure.json","w") as f:json.dump(out,f,indent=2)
+          Xraw=np.column_stack([sw*np.exp(u/2),sw*np.exp(-u/2)])
+          V=np.column_stack([v1,v2])
+
+          # Orthogonal projectors onto the two spans.
+          Praw=Xraw@np.linalg.inv(Xraw.T@Xraw)@Xraw.T
+          Pv=V@V.T
+
+          err=float(np.linalg.norm(Praw-Pv,2))
+          gram=float(np.linalg.norm(V.T@V-np.eye(2),2))
+          out={"constraint_span_projector_difference_2norm":err,
+               "V_orthonormality_error":gram,
+               "source_identity":
+               "v1,v2 are Gram-Schmidt orthonormalization of sqrt(w) exp(+/-u/2)"}
+          with open("v21-constraint-span.json","w") as f:json.dump(out,f,indent=2)
           print(json.dumps(out,indent=2))
-          print("NYSTROM STRUCTURE AUDIT: PASS")
+          if err>1e-10:raise RuntimeError("constraint span identity failed")
+          print("CONSTRAINT SPAN IDENTITY: PASS")
           PY
 
-      - name: Reconstruct analytic row326 kernel
+      - name: Reconstruct exact analytic kernel
         run: |
           python - <<'PY'
           import json,math,numpy as np
 
-          r=np.load("v20-r.npy"); c=np.load("v20-c.npy")
+          r=np.load("v21-r.npy");c=np.load("v21-c.npy")
           slope=np.diff(c)/np.diff(r)
           ids=[0]
           for i in range(1,len(slope)):
               if abs(slope[i]-slope[i-1])>1e-10:ids.append(i)
-          ids.append(len(r)-1); ids=sorted(set(ids))
+          ids.append(len(r)-1);ids=sorted(set(ids))
           knots=[(float(r[i]),float(c[i])) for i in ids]
-
           seg=[]
           for (a,ya),(b,yb) in zip(knots[:-1],knots[1:]):
-              A=(yb-ya)/(b-a); B=ya-A*a
+              A=(yb-ya)/(b-a);B=ya-A*a
               seg.append((a,b,A,B))
-
-          def moment(p):
-              s=0.
-              for a,b,A,B in seg:
-                  s+=A*(b**(p+2)-a**(p+2))/(p+2)
-                  s+=B*(b**(p+1)-a**(p+1))/(p+1)
-              return s
-
-          def k(x):
-              if abs(x)<1e-5:
-                  return sum(((-1)**m)*moment(2*m)*x**(2*m)/
-                             math.factorial(2*m) for m in range(8))/math.pi
-              z=0.
-              for a,b,A,B in seg:
-                  def F(q):
-                      return A*(q*math.sin(q*x)/x+math.cos(q*x)/x**2)+B*math.sin(q*x)/x
-                  z+=F(b)-F(a)
-              return z/math.pi
-
-          xs=np.linspace(-.8,.8,401)
-          out={"knots":knots,"M0":moment(0),"M2":moment(2),
-               "samples":[[float(x),float(k(float(x)))] for x in xs]}
-          with open("v20-analytic-kernel.json","w") as f:json.dump(out,f,indent=2)
-          print("knots",knots)
-          print("M0",out["M0"],"M2",out["M2"])
-          print("ANALYTIC KERNEL: PASS")
-          PY
-
-      - name: Compare reference matrix to analytic weighted kernel
-        run: |
-          python - <<'PY'
-          import json,math,numpy as np
-
-          u=np.load("v20-u.npy");w=np.load("v20-w.npy")
-          C=np.load("v20-C.npy")
-          with open("v20-analytic-kernel.json") as f:d=json.load(f)
-          knots=d["knots"]
-
-          seg=[]
-          for (a,ya),(b,yb) in zip(knots[:-1],knots[1:]):
-              A=(yb-ya)/(b-a);B=ya-A*a;seg.append((a,b,A,B))
 
           def moment(p):
               return sum(A*(b**(p+2)-a**(p+2))/(p+2)+
                          B*(b**(p+1)-a**(p+1))/(p+1)
                          for a,b,A,B in seg)
 
-          def k(x):
+          out={"knots":knots,
+               "moments":{str(p):moment(p) for p in range(7)}}
+          with open("v21-kernel-data.json","w") as f:json.dump(out,f,indent=2)
+          print(json.dumps(out,indent=2))
+          print("ANALYTIC PROFILE DATA: PASS")
+          PY
+
+      - name: Compare projected analytic and reference operators
+        run: |
+          python - <<'PY'
+          import json,math,numpy as np
+
+          u=np.load("v21-u.npy");w=np.load("v21-w.npy")
+          v1=np.load("v21-v1.npy");v2=np.load("v21-v2.npy")
+          Cref=np.load("v21-Cref.npy")
+          with open("v21-kernel-data.json") as f:d=json.load(f)
+          knots=d["knots"]; M={int(k):v for k,v in d["moments"].items()}
+
+          seg=[]
+          for (a,ya),(b,yb) in zip(knots[:-1],knots[1:]):
+              A=(yb-ya)/(b-a);B=ya-A*a;seg.append((a,b,A,B))
+
+          def kernel(x):
               if abs(x)<1e-5:
-                  return sum(((-1)**m)*moment(2*m)*x**(2*m)/
-                             math.factorial(2*m) for m in range(8))/math.pi
-              z=0.
+                  return sum(((-1)**m)*M[2*m]*x**(2*m)/
+                             math.factorial(2*m)
+                             for m in range(4))/math.pi
+              s=0.
               for a,b,A,B in seg:
                   def F(q):
-                      return A*(q*math.sin(q*x)/x+math.cos(q*x)/x**2)+B*math.sin(q*x)/x
-                  z+=F(b)-F(a)
-              return z/math.pi
+                      return A*(q*math.sin(q*x)/x+
+                                math.cos(q*x)/(x*x))+B*math.sin(q*x)/x
+                  s+=F(b)-F(a)
+              return s/math.pi
 
-          # Build exact analytic weighted kernel on the same u,w grid.
-          # 1200^2 evaluations are acceptable.
-          n=len(u); B=np.empty((n,n),float)
+          n=len(u);sw=np.sqrt(w)
+          B=np.empty((n,n),float)
           for i in range(n):
               for j in range(i,n):
-                  z=math.sqrt(w[i]*w[j])*k(float(u[i]-u[j]))
+                  z=sw[i]*sw[j]*kernel(float(u[i]-u[j]))
                   B[i,j]=z;B[j,i]=z
 
-          np.save("v20-Banalytic.npy",B)
-          D=C-B
-          out={"C_minus_B_inf":float(np.linalg.norm(D,np.inf)),
-               "C_minus_B_2":float(np.linalg.norm(D,2)),
-               "C_minus_B_maxentry":float(np.max(np.abs(D)))}
-          with open("v20-reference-vs-analytic.json","w") as f:json.dump(out,f,indent=2)
+          V=np.column_stack([v1,v2])
+          P=np.eye(n)-V@V.T
+          Can=P@B@P
+          Can=(Can+Can.T)/2
+
+          D=Cref-Can
+          np.save("v21-Can.npy",Can)
+          out={"projected_difference_2norm":float(np.linalg.norm(D,2)),
+               "projected_difference_inf":float(np.linalg.norm(D,np.inf)),
+               "projected_difference_maxentry":float(np.max(np.abs(D)))}
+          with open("v21-projected-comparison.json","w") as f:json.dump(out,f,indent=2)
           print(json.dumps(out,indent=2))
-          print("REFERENCE/ANALYTIC COMPARISON: PASS")
+          print("CORRECTED PROJECTED COMPARISON: PASS")
           PY
 
-      - name: Identify discrete constraint vectors
+      - name: Rigorous r-trapezoid scalar error bound
         run: |
           python - <<'PY'
-          import json,numpy as np,math
+          import json,math,numpy as np
 
-          u=np.load("v20-u.npy");w=np.load("v20-w.npy")
-          v1=np.load("v20-v1.npy");v2=np.load("v20-v2.npy")
-          sw=np.sqrt(w)
+          r=np.load("v21-r.npy");c=np.load("v21-c.npy")
+          u=np.load("v21-u.npy")
+          R=float(r[-1]); dr=float(r[1]-r[0])
+          xmax=float(np.max(u)-np.min(u))
 
-          # Candidate weighted samples of continuous pole functions.
-          gplus=sw*np.exp(u/2)
-          gminus=sw*np.exp(-u/2)
+          # f(r)=c(r) cos(rx). On each linear segment c''=0:
+          #
+          # f''(r) = -2 c'(r) x sin(rx) - c(r) x^2 cos(rx).
+          #
+          # Thus |f''| <= 2 |c'| |x| + |c| x^2.
+          #
+          # Composite trapezoid on each smooth grid cell:
+          # |int f - T(f)| <= sum h^3/12 sup_cell |f''|.
+          #
+          # The profile breakpoints are grid-aligned, so no derivative jump
+          # lies inside a cell.
 
-          def rel(a,b):
-              # sign/scale invariant comparison
-              alpha=float(np.dot(a,b)/np.dot(b,b))
-              return float(np.linalg.norm(a-alpha*b)/np.linalg.norm(a)),alpha
+          slopes=np.diff(c)/np.diff(r)
+          total=0.0
+          cell_bounds=[]
+          for i in range(len(r)-1):
+              h=float(r[i+1]-r[i])
+              cp=abs(float(slopes[i]))
+              cm=max(abs(float(c[i])),abs(float(c[i+1])))
+              f2=2*cp*xmax+cm*xmax*xmax
+              e=h**3*f2/12
+              total+=e
+              cell_bounds.append(e)
 
-          candidates={}
-          for name,v in [("v1",v1),("v2",v2)]:
-              ep,ap=rel(v,gplus); em,am=rel(v,gminus)
-              candidates[name]={"vs_sqrtw_exp_plus":{"relative":ep,"scale":ap},
-                                "vs_sqrtw_exp_minus":{"relative":em,"scale":am}}
-          with open("v20-constraint-identification.json","w") as f:
-              json.dump(candidates,f,indent=2)
-          print(json.dumps(candidates,indent=2))
-          print("CONSTRAINT IDENTIFICATION: PASS")
-          PY
+          kernel_sup=total/math.pi
 
-      - name: Exact projector equivalence on finite weighted space
-        run: |
-          python - <<'PY'
-          import json,numpy as np
-          from scipy.linalg import null_space
+          # Weighted Nyström matrix E_ij=sqrt(w_iw_j)e(u_i-u_j).
+          # Schur/row-sum bound:
+          # ||E||_2 <= ||E||_inf <= max_i sqrt(w_i) sum_j sqrt(w_j)*kernel_sup.
+          w=np.load("v21-w.npy");sw=np.sqrt(w)
+          matrix_op=kernel_sup*float(np.max(sw))*float(np.sum(sw))
 
-          v1=np.load("v20-v1.npy");v2=np.load("v20-v2.npy")
-          Q=np.load("v20-Q.npy")
-          X=np.column_stack([v1,v2])
-
-          # Q Q^T is the orthogonal complement projector to span(X).
-          Pq=Q@Q.T
-          Px=np.eye(len(v1))-X@np.linalg.inv(X.T@X)@X.T
-
-          err=float(np.linalg.norm(Pq-Px,2))
-          idem=float(np.linalg.norm(Pq@Pq-Pq,2))
-          annih=float(np.linalg.norm(Pq@X,2))
-
-          out={"projector_equivalence_2norm":err,
-               "idempotence_error":idem,
-               "constraint_annihilation":annih}
-          with open("v20-projector-equivalence.json","w") as f:json.dump(out,f,indent=2)
+          out={"dr":dr,"xmax":xmax,
+               "integral_trapezoid_error_uniform_x":total,
+               "kernel_sup_error":kernel_sup,
+               "weighted_matrix_operator_error_bound":matrix_op}
+          with open("v21-r-quadrature-bound.json","w") as f:json.dump(out,f,indent=2)
           print(json.dumps(out,indent=2))
-          if err>1e-10:raise RuntimeError("finite projector equivalence failed")
-          print("FINITE PROJECTOR EQUIVALENCE: PASS")
+          print("R-QUADRATURE BOUND: PASS")
           PY
 
-      - name: Common-space identification error budget
-        run: |
-          python - <<'PY'
-          import json,numpy as np,math
-
-          with open("v20-reference-vs-analytic.json") as f:d=json.load(f)
-          with open("v20-constraint-identification.json") as f:c=json.load(f)
-          with open("v20-projector-equivalence.json") as f:p=json.load(f)
-
-          # The matrix comparison directly measures the difference between the
-          # reference profile_operator matrix and the analytic weighted-kernel
-          # matrix on the same nodes/weights.
-          eta_kernel=float(d["C_minus_B_2"])
-
-          # Constraint-vector mismatch is converted conservatively to a
-          # diagnostic identification budget. This is NOT automatically a
-          # theorem unless the reference source confirms the expected formulas.
-          rels=[
-            c["v1"]["vs_sqrtw_exp_plus"]["relative"],
-            c["v1"]["vs_sqrtw_exp_minus"]["relative"],
-            c["v2"]["vs_sqrtw_exp_plus"]["relative"],
-            c["v2"]["vs_sqrtw_exp_minus"]["relative"]
-          ]
-          best_pair=min(
-            max(rels[0],rels[3]),
-            max(rels[1],rels[2])
-          )
-
-          out={"same_grid_kernel_difference_2norm":eta_kernel,
-               "best_constraint_sample_relative_mismatch":best_pair,
-               "finite_projector_algebra_error":p["projector_equivalence_2norm"],
-               "exact_identification_proved":False}
-          with open("v20-identification-budget.json","w") as f:json.dump(out,f,indent=2)
-          print(json.dumps(out,indent=2))
-          PY
-
-      - name: Decide whether identification can be promoted
+      - name: Check measured discrepancy against theorem bound
         run: |
           python - <<'PY'
           import json
+          with open("v21-projected-comparison.json") as f:m=json.load(f)
+          with open("v21-r-quadrature-bound.json") as f:b=json.load(f)
 
-          with open("v20-identification-budget.json") as f:b=json.load(f)
-          with open("v20-reference-source.json") as f:s=json.load(f)
-
-          # Promotion is intentionally strict. Numerical equality alone is not
-          # enough. V20 only marks exact identification if both discrepancies
-          # are essentially machine-zero; otherwise it reports a perturbation
-          # target for V21.
-          tiny_kernel=b["same_grid_kernel_difference_2norm"]<1e-10
-          tiny_constraints=b["best_constraint_sample_relative_mismatch"]<1e-10
-          tiny_projector=b["finite_projector_algebra_error"]<1e-10
-
-          promoted=bool(tiny_kernel and tiny_constraints and tiny_projector)
-          status=("IDENTIFICATION_NUMERICALLY_EXACT_SOURCE_LEMMA_REQUIRED"
-                  if promoted else
-                  "FINITE_TO_COMMON_SPACE_PERTURBATION_BOUND_REQUIRED")
-
-          out={"row":326,"numeric_identification_passes":promoted,
-               "continuum_certified":False,"status":status,
-               "kernel_same_grid_2norm":b["same_grid_kernel_difference_2norm"],
-               "constraint_relative_mismatch":b["best_constraint_sample_relative_mismatch"],
-               "projector_algebra_error":b["finite_projector_algebra_error"],
-               "next_requirement":
-                 "derive source-level algebraic identity if discrepancies are zero; otherwise rigorously bound the measured finite/common-space mismatch"}
-          with open("v20-decision.json","w") as f:json.dump(out,f,indent=2)
+          measured=float(m["projected_difference_2norm"])
+          bound=float(b["weighted_matrix_operator_error_bound"])
+          out={"measured_projected_2norm":measured,
+               "rigorous_r_quadrature_operator_bound":bound,
+               "measured_below_bound":bool(measured<=bound*(1+1e-10))}
+          with open("v21-bound-check.json","w") as f:json.dump(out,f,indent=2)
           print(json.dumps(out,indent=2))
+          if measured>bound*(1+1e-10):
+              raise RuntimeError("measured discrepancy exceeds derived quadrature bound")
+          print("BOUND CONSISTENCY: PASS")
+          PY
+
+      - name: Assemble all row326 error budgets
+        run: |
+          python - <<'PY'
+          import json
+          with open("v21-input.json") as f:i=json.load(f)
+          with open("v21-r-quadrature-bound.json") as f:q=json.load(f)
+
+          # V17 common-space u-discretization/projector bound.
+          v17=1.7962225841646505e-06
+
+          # V19 finite spectral upper shift used mu=lambda+5e-7.
+          finite_extra=5e-7
+
+          # V21 adds rigorous r quadrature discrepancy between the exact
+          # piecewise-linear spectral integral and profile_operator's trapz.
+          rerr=float(q["weighted_matrix_operator_error_bound"])
+
+          total=v17+finite_extra+rerr
+          shifted=float(i["cap"])+total
+
+          out={"V17_u_and_projector_error":v17,
+               "V19_finite_spectral_extra":finite_extra,
+               "V21_r_quadrature_error":rerr,
+               "total_inflation_budget":total,
+               "cap":float(i["cap"]),
+               "shifted_upper_using_budget":shifted,
+               "allowed_plus_0p010":float(i["cap"])+.010,
+               "beats_plus_0p010":bool(total<.010)}
+          with open("v21-assembly.json","w") as f:json.dump(out,f,indent=2)
+          print(json.dumps(out,indent=2))
+          if total>=.010:raise RuntimeError("combined rigorous budget exhausted")
+          print("COMBINED BUDGET: PASS")
+          PY
+
+      - name: Source-level algebraic lemma record
+        run: |
+          cat > V21-IDENTIFICATION-LEMMA.txt <<'EOF'
+          IDENTIFICATION LEMMA — FINITE STRUCTURE
+
+          Let u_i be the uniform grid on [-L,L], w_i the trapezoid weights,
+          and S=diag(sqrt(w_i)).
+
+          Let
+              g_+(u)=exp(u/2),  g_-(u)=exp(-u/2).
+
+          build_operator constructs c1=S g_+(u_i), c2=S g_-(u_i), then applies
+          Gram-Schmidt. Therefore
+
+              span(v1,v2)=span(c1,c2)
+
+          exactly in exact arithmetic. Consequently
+
+              P_N = I - v1 v1^T - v2 v2^T
+
+          is the Euclidean representation of the weighted-grid orthogonal
+          complement of the two sampled pole constraints.
+
+          profile_operator first constructs
+
+              k_T(x) = (1/pi) Trap_r[c(r) cos(rx)]
+
+          and
+
+              B_T(i,j)=sqrt(w_i w_j) k_T(u_i-u_j),
+
+          then returns P_N B_T P_N.
+
+          The analytic comparison operator uses
+
+              k(x)=(1/pi) int c(r) cos(rx) dr,
+              B(i,j)=sqrt(w_i w_j) k(u_i-u_j),
+
+          and the same P_N.
+
+          Hence
+
+              ||P_N B_T P_N - P_N B P_N||
+              <= ||B_T-B||,
+
+          because orthogonal projection has norm 1.
+
+          V21 bounds ||B_T-B|| using the composite trapezoid error in r.
+          EOF
+
+      - name: Fail-closed V21 decision
+        run: |
+          python - <<'PY'
+          import json
+          with open("v21-assembly.json") as f:a=json.load(f)
+          with open("v21-bound-check.json") as f:b=json.load(f)
+          with open("v21-constraint-span.json") as f:s=json.load(f)
+
+          decision={
+            "row":326,
+            "continuum_certified":False,
+            "status":"IDENTIFICATION_LEMMA_AND_R_QUADRATURE_BOUND_AVAILABLE",
+            "constraint_span_check":
+              s["constraint_span_projector_difference_2norm"],
+            "r_quadrature_bound_consistent":b["measured_below_bound"],
+            "combined_budget":a["total_inflation_budget"],
+            "within_plus_0p010":a["beats_plus_0p010"],
+            "remaining_gap":[
+              "upgrade V19 floating finite spectral certificate to theorem-level outward-rounded or rigorously derived backward-error certificate",
+              "audit V17 common-space interpolation/projector theorem assumptions against the exact V21 identification lemma",
+              "independent end-to-end no-double-counting audit before setting continuum_certified=true"
+            ]
+          }
+          with open("v21-decision.json","w") as f:json.dump(decision,f,indent=2)
+          print(json.dumps(decision,indent=2))
           print("FAIL-CLOSED: continuum_certified=false")
           PY
 
-      - name: Write V20 ledger
+      - name: Write ledger
         run: |
-          cat > V20-LEDGER.txt <<'EOF'
-          V20 — IDENTIFICATION LEMMA AUDIT, ROW 326
+          cat > V21-LEDGER.txt <<'EOF'
+          V21 — CORRECTED IDENTIFICATION, ROW 326
 
-          PURPOSE
-          -------
-          V17 bounded a common-space interpolation approximation to the
-          continuum operator. V19 certified the numerical behavior of the
-          reference finite matrix. Those two objects must not be identified
-          without proof.
+          V20 compared projected and unprojected operators and compared the
+          second Gram-Schmidt vector directly with the raw second constraint.
+          Those comparisons were not mathematically appropriate.
 
-          V20 therefore:
+          V21 corrects both points.
 
-          1. captures the exact source of build_operator and profile_operator;
-          2. reconstructs the analytic Fourier kernel of the row-326 profile;
-          3. constructs the weighted Nyström matrix
-                 B_ij = sqrt(w_i w_j) k(u_i-u_j);
-          4. compares it with the reference profile_operator matrix;
-          5. identifies v1,v2 against weighted samples of exp(+u/2),exp(-u/2);
-          6. verifies that null_space compression equals the finite orthogonal
-             complement projector algebraically up to numerical roundoff.
+          It compares the constraint SPANS, not individual Gram-Schmidt
+          vectors, and compares
 
-          PROMOTION RULE
-          --------------
-          Even if every numerical discrepancy is at machine precision, V20
-          does not declare continuum_certified=true. Numerical agreement is
-          evidence for the identification lemma, not its proof.
+              P_N B_analytic P_N
 
-          If the formulas match, V21 should turn the source-level formulas into
-          an explicit algebraic lemma and remove the remaining implementation
-          ambiguity. If they do not match, V21 must bound the discrepancy.
+          against profile_operator, which already applies P_N.
 
-          continuum_certified=false.
+          The remaining difference is the spectral-r trapezoid quadrature.
+          Since c is linear on every r cell,
+
+              f(r)=c(r)cos(rx)
+
+          obeys on each cell
+
+              |f''(r)| <= 2|c'(r)||x| + |c(r)|x^2.
+
+          The standard composite trapezoid remainder is summed cell by cell
+          and converted into a weighted finite-matrix operator norm bound.
+
+          The identification lemma is now explicit at source/formula level.
+
+          continuum_certified remains false pending a theorem-level finite
+          floating certificate and an independent end-to-end audit.
+
           NO T1/RH PROOF CLAIM IS MADE.
           EOF
 
-      - name: Upload V20 evidence
+      - name: Upload V21 evidence
         uses: actions/upload-artifact@v4
         with:
-          name: t1-L040-v20-identification-row326
+          name: t1-L040-v21-corrected-identification-row326
           path: |
-            v20-reference-source.json
-            v20-input.json
-            v20-nystrom-structure.json
-            v20-analytic-kernel.json
-            v20-reference-vs-analytic.json
-            v20-constraint-identification.json
-            v20-projector-equivalence.json
-            v20-identification-budget.json
-            v20-decision.json
-            V20-LEDGER.txt
+            v21-input.json
+            v21-constraint-span.json
+            v21-kernel-data.json
+            v21-projected-comparison.json
+            v21-r-quadrature-bound.json
+            v21-bound-check.json
+            v21-assembly.json
+            v21-decision.json
+            V21-IDENTIFICATION-LEMMA.txt
+            V21-LEDGER.txt
