@@ -1,4 +1,4 @@
-name: T1 L040 V4 Spectral Enclosures
+name: T1 L040 V5 Convergence Audit
 
 on:
   workflow_dispatch:
@@ -6,9 +6,9 @@ on:
     branches: [main]
 
 jobs:
-  spectral:
+  convergence:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
 
     steps:
       - uses: actions/checkout@v4
@@ -30,370 +30,471 @@ jobs:
           test "$(git rev-parse HEAD)" = \
             "94fa51e8f26794ef2d206c6c12e7adb4d85cbeaf"
 
-      - name: Reconstruct and analyze priority signed operators
+      - name: Run multi-resolution convergence audit
         working-directory: reference-riemann/experiments/weil_positivity
         run: |
           python - <<'PY'
           import json
           import numpy as np
-
-          from scipy.optimize import linprog
-          from flint import arb, ctx
-
           from sigma_t1c import run
 
-          ctx.prec = 160
-
           L = 0.40
+
           TARGETS = [341, 326, 396]
 
-          val, st = run(L, verbose=True)
-
-          r = np.asarray(
-              st["r"],
-              dtype=float
-          )
-
-          rows = [
-              np.asarray(x, dtype=float)
-              for x in st["rows"]
+          NS = [
+              300,
+              600,
+              1200,
+              2400
           ]
 
-          caps = np.asarray(
-              st["caps"],
-              dtype=float
-          )
-
-          cost = np.asarray(
-              st["cost"],
-              dtype=float
-          )
-
-          tail = float(st["tail"])
-
-          A = np.vstack(
-              rows + [np.ones_like(r)]
-          )
-
-          b = np.concatenate(
-              [caps, [1.0]]
-          )
-
-          lp = linprog(
-              cost - tail,
-              A_ub=A,
-              b_ub=b,
-              bounds=(0, None),
-              method="highs"
-          )
-
-          if not lp.success:
-              raise RuntimeError(
-                  lp.message
-              )
-
-          y = -np.asarray(
-              lp.ineqlin.marginals[:-1],
-              dtype=float
-          )
-
-          print(
-              "state keys:",
-              sorted(st.keys())
-          )
-
-          report = {
+          out = {
               "L": L,
-
-              "pilot_floor":
-                  float(val),
-
-              "targets": [],
-
-              "arb_precision_bits":
-                  int(ctx.prec),
-
-              "status":
-                  "FINITE_DIMENSIONAL_ENCLOSURE_ONLY"
+              "reference_commit":
+                  "94fa51e8f26794ef2d206c6c12e7adb4d85cbeaf",
+              "targets": TARGETS,
+              "runs": []
           }
 
+          for n in NS:
+
+              print()
+              print("=" * 78)
+              print("RUN n =", n)
+              print("=" * 78)
+
+              val, st = run(
+                  L,
+                  n=n,
+                  verbose=True
+              )
+
+              caps = np.asarray(
+                  st["caps"],
+                  dtype=float
+              )
+
+              rows = [
+                  np.asarray(x, dtype=float)
+                  for x in st["rows"]
+              ]
+
+              if len(caps) <= max(TARGETS):
+                  raise RuntimeError(
+                      f"n={n}: insufficient rows "
+                      f"({len(caps)})"
+                  )
+
+              target_data = {}
+
+              for idx in TARGETS:
+
+                  target_data[
+                      str(idx)
+                  ] = {
+                      "cap":
+                          float(caps[idx]),
+
+                      "row_min":
+                          float(
+                              np.min(rows[idx])
+                          ),
+
+                      "row_max":
+                          float(
+                              np.max(rows[idx])
+                          )
+                  }
+
+                  print(
+                      "target",
+                      idx,
+                      "cap =",
+                      repr(
+                          float(caps[idx])
+                      )
+                  )
+
+              out["runs"].append({
+                  "n":
+                      n,
+
+                  "pilot_floor":
+                      float(val),
+
+                  "row_count":
+                      int(len(caps)),
+
+                  "targets":
+                      target_data
+              })
+
           print()
-          print("=" * 72)
-          print("PRIORITY SIGNED ROWS")
-          print("=" * 72)
+          print("=" * 78)
+          print("CONVERGENCE TABLE")
+          print("=" * 78)
 
           for idx in TARGETS:
 
-              sigma = rows[idx]
+              print()
+              print("ROW", idx)
 
-              item = {
-                  "row":
-                      idx,
+              prev = None
 
-                  "dual_weight":
-                      float(y[idx]),
+              for run_data in out["runs"]:
 
-                  "published_cap_float":
-                      float(caps[idx]),
+                  n = run_data["n"]
 
-                  "sigma_min":
-                      float(
-                          np.min(sigma)
-                      ),
+                  cap = (
+                      run_data["targets"]
+                      [str(idx)]
+                      ["cap"]
+                  )
 
-                  "sigma_max":
-                      float(
-                          np.max(sigma)
+                  if prev is None:
+                      delta = None
+                  else:
+                      delta = abs(
+                          cap - prev
                       )
+
+                  print(
+                      f"n={n:5d}",
+                      "cap=",
+                      f"{cap:.15g}",
+                      "delta_prev=",
+                      (
+                          "-"
+                          if delta is None
+                          else
+                          f"{delta:.6g}"
+                      )
+                  )
+
+                  prev = cap
+
+          # -----------------------------------------
+          # Estimate observed convergence only.
+          #
+          # This is NOT used as a rigorous bound.
+          # -----------------------------------------
+
+          observed = {}
+
+          for idx in TARGETS:
+
+              vals = [
+                  x["targets"]
+                  [str(idx)]
+                  ["cap"]
+                  for x in out["runs"]
+              ]
+
+              diffs = [
+                  abs(
+                      vals[i] - vals[i - 1]
+                  )
+                  for i in range(
+                      1,
+                      len(vals)
+                  )
+              ]
+
+              ratios = []
+
+              for i in range(
+                  1,
+                  len(diffs)
+              ):
+
+                  if diffs[i] > 0:
+                      ratios.append(
+                          diffs[i - 1]
+                          / diffs[i]
+                      )
+
+              observed[
+                  str(idx)
+              ] = {
+                  "values":
+                      vals,
+
+                  "successive_differences":
+                      diffs,
+
+                  "difference_ratios":
+                      ratios
               }
 
-              print()
-              print(
-                  "ROW",
-                  idx
-              )
-
-              print(
-                  "dual y =",
-                  y[idx]
-              )
-
-              print(
-                  "published cap =",
-                  caps[idx]
-              )
-
-              print(
-                  "sigma range =",
-                  np.min(sigma),
-                  np.max(sigma)
-              )
-
-              # ---------------------------------------
-              # Arb enclosure of the stored FLOAT cap.
-              #
-              # IMPORTANT:
-              # This encloses representation/rounding
-              # only. It is NOT yet an operator-level
-              # spectral certificate.
-              # ---------------------------------------
-
-              c = arb(
-                  str(caps[idx])
-              )
-
-              # python-flint 0.9-compatible
-              # interval inflation.
-              c_ball = (
-                  c
-                  + arb("0 +/- 1e-14")
-              )
-
-              item[
-                  "float_cap_arb_ball"
-              ] = str(c_ball)
-
-              print(
-                  "Arb ball around stored cap:",
-                  c_ball
-              )
-
-              report[
-                  "targets"
-              ].append(item)
+          out[
+              "observed_convergence"
+          ] = observed
 
           with open(
-              "../../../v4-priority.json",
+              "../../../v5-convergence.json",
               "w"
           ) as f:
 
               json.dump(
-                  report,
+                  out,
                   f,
                   indent=2,
                   sort_keys=True
               )
 
           print()
-          print("=" * 72)
-          print("IMPORTANT")
-          print("=" * 72)
-
           print(
-              "These Arb balls enclose stored "
-              "floating-point caps only."
-          )
-
-          print(
-              "They DO NOT yet prove "
-              "Lambda <= cap."
-          )
-
-          print(
-              "The remaining theorem obligation "
-              "is an operator-level continuum "
-              "upper bound."
+              "IMPORTANT: convergence is "
+              "empirical, not a proof."
           )
           PY
 
-      - name: Derive perturbation budget
+      - name: Compare against error targets
+        run: |
+          python - <<'PY'
+          import json
+
+          with open(
+              "v5-convergence.json"
+          ) as f:
+              d = json.load(f)
+
+          targets = {
+              "341":
+                  0.0156846161434,
+
+              "326":
+                  0.0185525631047,
+
+              "396":
+                  0.0479955923013
+          }
+
+          print(
+              "ENGINEERING TARGET COMPARISON"
+          )
+
+          print(
+              "(diagnostic only; "
+              "NOT rigorous)"
+          )
+
+          for row, limit in targets.items():
+
+              diffs = (
+                  d[
+                      "observed_convergence"
+                  ]
+                  [row]
+                  [
+                      "successive_differences"
+                  ]
+              )
+
+              last = diffs[-1]
+
+              print()
+              print(
+                  "row",
+                  row
+              )
+
+              print(
+                  "last |cap_2400-cap_1200| =",
+                  last
+              )
+
+              print(
+                  "target delta =",
+                  limit
+              )
+
+              print(
+                  "ratio target/observed =",
+                  (
+                      limit / last
+                      if last > 0
+                      else float("inf")
+                  )
+              )
+          PY
+
+      - name: Test projected-HS algebra
+        run: |
+          python - <<'PY'
+          import numpy as np
+
+          rng = np.random.default_rng(
+              20260916
+          )
+
+          for n in [
+              20,
+              50,
+              100
+          ]:
+
+              X = rng.normal(
+                  size=(n, n)
+              )
+
+              K = (
+                  X + X.T
+              ) / 2
+
+              U, _ = np.linalg.qr(
+                  rng.normal(
+                      size=(n, 2)
+                  )
+              )
+
+              P = (
+                  np.eye(n)
+                  - U @ U.T
+              )
+
+              direct = np.linalg.norm(
+                  P @ K @ P,
+                  "fro"
+              )
+
+              K2 = K @ K
+
+              M = (
+                  U.T
+                  @ K
+                  @ U
+              )
+
+              rhs2 = (
+                  np.trace(K2)
+                  - 2
+                  * np.trace(
+                      U.T
+                      @ K2
+                      @ U
+                  )
+                  + np.trace(
+                      M @ M
+                  )
+              )
+
+              formula = np.sqrt(
+                  max(
+                      float(rhs2),
+                      0.0
+                  )
+              )
+
+              err = abs(
+                  direct - formula
+              )
+
+              print(
+                  n,
+                  direct,
+                  formula,
+                  err
+              )
+
+              if err > 1e-9:
+                  raise RuntimeError(
+                      "Projected HS identity failed"
+                  )
+
+          print(
+              "PROJECTED HS ALGEBRA: PASS"
+          )
+          PY
+
+      - name: Verify Arb precision
         run: |
           python - <<'PY'
           from flint import arb, ctx
 
-          ctx.prec = 160
+          ctx.prec = 192
 
-          # For self-adjoint operators:
-          #
-          # lambda_max(A)
-          # <= lambda_max(B)
-          #    + ||A-B||_op
-          #
-          # and
-          #
-          # ||A-B||_op
-          # <= ||A-B||_HS
+          x = arb("0.4")
 
-          pilot = arb(
-              "0.0847191143605307"
-          )
-
-          target_budget = arb(
-              "0.04"
+          print(
+              "precision bits =",
+              ctx.prec
           )
 
           print(
-              "float pilot ball =",
-              pilot
+              "sin(0.4) =",
+              x.sin()
           )
 
           print(
-              "target total spectral-error "
-              "budget <",
-              target_budget
-          )
-
-          weights = {
-              341:
-                  arb("0.425044936115"),
-
-              326:
-                  arb("0.359339387719"),
-
-              396:
-                  arb("0.138901643818")
-          }
-
-          # Engineering allocation only.
-          # Not itself part of the proof.
-
-          per = (
-              target_budget
-              / arb(6)
-          )
-
-          print()
-          print(
-              "Suggested delta targets:"
-          )
-
-          for row, y in weights.items():
-
-              delta = (
-                  per / y
-              )
-
-              print(
-                  row,
-                  "delta <",
-                  delta,
-                  "gives weighted loss <",
-                  per
-              )
-
-          print()
-          print(
-              "NEXT REQUIREMENT:"
-          )
-
-          print(
-              "Construct proven delta_N "
-              "with ||K-K_N|| <= delta_N."
+              "ARB 192-BIT: PASS"
           )
           PY
 
-      - name: Inspect exact spectral implementation
+      - name: Write V5 interpretation
         run: |
-          echo "===== sigma_t1c spectral calls ====="
+          cat > V5-STATUS.txt <<'EOF'
+          V5 CONVERGENCE AUDIT
 
-          grep -n \
-            -E "eig|eigh|lambda|cap|project|kernel|signed|theta" \
-            reference-riemann/experiments/weil_positivity/sigma_t1c.py \
-            | head -n 250 \
-            | tee spectral-source-map.txt || true
+          PURPOSE
 
-          echo "" >> spectral-source-map.txt
-          echo "===== sigma_lp helpers =====" \
-            >> spectral-source-map.txt
+          Measure finite-dimensional convergence
+          of the priority signed spectral caps at
 
-          grep -n \
-            -E "eig|eigh|project|kernel|cap|sigma" \
-            reference-riemann/experiments/weil_positivity/sigma_lp.py \
-            | head -n 250 \
-            >> spectral-source-map.txt || true
+              n = 300, 600, 1200, 2400.
 
-          echo "" >> spectral-source-map.txt
-          echo "===== sharp_floor helpers =====" \
-            >> spectral-source-map.txt
+          Priority rows:
 
-          grep -n \
-            -E "eig|eigh|project|kernel|cap|moment|rank" \
-            reference-riemann/experiments/weil_positivity/sharp_floor.py \
-            | head -n 250 \
-            >> spectral-source-map.txt || true
+              341
+              326
+              396
 
-          cat spectral-source-map.txt
+          This experiment answers:
 
-      - name: Write V4 status
-        run: |
-          cat > V4-STATUS.txt <<'EOF'
-          V4 STATUS
+          Is the numerical discretization error
+          plausibly far below the available dual
+          margin?
 
-          Expected PASS conditions:
+          IT DOES NOT PROVE THIS.
 
-          - pinned reference reproduced
-          - rows 341, 326 and 396 recovered
-          - Arb running at 160-bit precision
-          - stored FLOAT caps enclosed by Arb balls
-          - spectral implementation source map exported
+          A rigorous continuum certificate still
+          requires a theorem of the form
 
-          IMPORTANT
-
-          This is NOT yet a continuum spectral
-          certificate.
-
-          Remaining mathematical obligation:
-
-              lambda_max(A_continuous)
+              lambda_max(A)
               <=
               lambda_max(A_N)
               + delta_N
 
-          where delta_N is a rigorously proved
-          approximation-error bound.
+          where delta_N is an analytically or
+          interval-arithmetically VERIFIED upper
+          bound.
 
-          Only after such a delta_N exists may
-          rigorous Lambda+ values be charged
-          against the positive dual margin.
+          TWO CANDIDATE ROUTES
+
+          Route A:
+              Nystrom eigenvalue
+              + rigorous quadrature/operator
+                perturbation remainder.
+
+          Route B:
+              projected Hilbert-Schmidt /
+              second-moment upper bound
+              + verified one-dimensional
+                integrals
+              + rank-2 pole corrections.
+
+          V5 is intended to determine which route
+          has enough numerical slack before the
+          rigorous derivation is implemented.
           EOF
 
-          cat V4-STATUS.txt
+          cat V5-STATUS.txt
 
-      - name: Upload V4 evidence
+      - name: Upload V5 evidence
         uses: actions/upload-artifact@v4
         with:
-          name: t1-L040-v4-spectral
+          name: t1-L040-v5-convergence
           path: |
-            v4-priority.json
-            spectral-source-map.txt
-            V4-STATUS.txt
+            v5-convergence.json
+            V5-STATUS.txt
