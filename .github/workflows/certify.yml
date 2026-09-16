@@ -1,0 +1,122 @@
+name: T1 L040 Certification
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+jobs:
+  certify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout our repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install numerical and rigorous tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install numpy scipy mpmath python-flint
+
+      - name: Verify Arb / FLINT
+        run: |
+          python - <<'PY'
+          from flint import arb
+
+          x = arb(1) / 3
+          y = 3*x
+
+          print("Arb / FLINT operational")
+          print("1/3 =", x)
+          print("3*(1/3) =", y)
+          print("sin(0.4) =", arb("0.4").sin())
+          PY
+
+      - name: Fetch reference research code
+        run: |
+          git clone --depth 1 \
+            https://github.com/Kuberwastaken/riemann.git \
+            reference-riemann
+
+          echo "Reference commit:"
+          git -C reference-riemann rev-parse HEAD
+
+          ls reference-riemann/experiments/weil_positivity
+
+      - name: Verify T1 source files
+        run: |
+          test -f reference-riemann/experiments/weil_positivity/sigma_t1c.py
+          test -f reference-riemann/experiments/weil_positivity/sharp_floor.py
+          test -f reference-riemann/experiments/weil_positivity/sigma_lp.py
+
+          echo "T1 source files found."
+
+      - name: Projected Hilbert-Schmidt identity test
+        run: |
+          python - <<'PY'
+          import numpy as np
+
+          rng = np.random.default_rng(123456)
+
+          A = rng.normal(size=(40,40))
+          K = (A + A.T)/2
+
+          U,_ = np.linalg.qr(rng.normal(size=(40,2)))
+
+          P = np.eye(40) - U @ U.T
+
+          direct = np.linalg.norm(P @ K @ P, "fro")
+
+          K2 = K @ K
+          M = U.T @ K @ U
+
+          rhs2 = (
+              np.trace(K2)
+              - 2*np.trace(U.T @ K2 @ U)
+              + np.trace(M @ M)
+          )
+
+          formula = np.sqrt(max(rhs2,0))
+
+          print("direct =", direct)
+          print("formula =", formula)
+          print("error =", abs(direct-formula))
+
+          assert abs(direct-formula) < 1e-10
+
+          print("Projected HS identity: PASS")
+          PY
+
+      - name: Run published L=0.40 pilot
+        working-directory: reference-riemann/experiments/weil_positivity
+        run: |
+          python sigma_t1c.py 0.40 | tee ../../../t1-L040-pilot.txt
+
+      - name: Show certification warning
+        run: |
+          echo "=============================================="
+          echo "IMPORTANT"
+          echo "=============================================="
+          echo "The sigma-LP result above is a FLOAT PILOT."
+          echo "It is NOT a proof."
+          echo ""
+          echo "Arb/FLINT is operational."
+          echo "The reference T1 calculation is reproducible."
+          echo "The projected-HS identity is independently tested."
+          echo ""
+          echo "NEXT:"
+          echo "certify active spectral caps + grid + tail."
+          echo "=============================================="
+
+      - name: Upload pilot output
+        uses: actions/upload-artifact@v4
+        with:
+          name: t1-L040-pilot
+          path: t1-L040-pilot.txt
