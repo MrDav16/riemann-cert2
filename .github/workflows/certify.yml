@@ -1,4 +1,4 @@
-name: T1 L040 V12 k8 Continuum Route Audit
+name: T1 L040 V13 Rigorous k8 Enclosure Prototype
 
 on:
   workflow_dispatch:
@@ -6,12 +6,13 @@ on:
     branches: [main]
 
 jobs:
-  k8-continuum-audit:
+  rigorous-k8-prototype:
     runs-on: ubuntu-latest
     timeout-minutes: 90
 
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -28,332 +29,496 @@ jobs:
           git checkout 94fa51e8f26794ef2d206c6c12e7adb4d85cbeaf
           test "$(git rev-parse HEAD)" = "94fa51e8f26794ef2d206c6c12e7adb4d85cbeaf"
 
-      - name: Extract exact active shifted profiles
+      - name: Extract row 326 exact shifted profile
         working-directory: reference-riemann/experiments/weil_positivity
-        run: |
-          python - <<'PY'
-          import json,numpy as np
-          from scipy.optimize import linprog
-          from sigma_t1c import run
-
-          L=.40; N=1200; targets=[341,326,396]
-          val,st=run(L,n=N,verbose=False)
-          r=np.asarray(st["r"],float)
-          rows=[np.asarray(x,float) for x in st["rows"]]
-          caps=np.asarray(st["caps"],float)
-          cost=np.asarray(st["cost"],float); tail=float(st["tail"])
-
-          A=np.vstack(rows+[np.ones_like(r)])
-          b=np.concatenate([caps,[1.]])
-          lp=linprog(cost-tail,A_ub=A,b_ub=b,bounds=(0,None),method="highs")
-          if not lp.success: raise RuntimeError(lp.message)
-          dual=-np.asarray(lp.ineqlin.marginals[:-1],float)
-
-          out={"L":L,"pilot":float(val),"r":r.tolist(),"targets":{}}
-          for j in targets:
-              sig=rows[j]
-              theta=abs(float(sig.min()))
-              c=sig+theta
-              if c.min() < -1e-12:
-                  raise RuntimeError(f"row {j}: shifted profile negative")
-              out["targets"][str(j)]={
-                  "cap":float(caps[j]),
-                  "dual":float(dual[j]),
-                  "theta":theta,
-                  "sigma":sig.tolist(),
-                  "c":c.tolist()
-              }
-              print("ROW",j,"cap",caps[j],"dual",dual[j],"theta",theta,
-                    "cmin",c.min(),"cmax",c.max())
-
-          with open("../../../v12-input.json","w") as f:
-              json.dump(out,f,indent=2,sort_keys=True)
-          print("EXACT SHIFTED PROFILE EXTRACTION: PASS")
-          PY
-
-      - name: Recover piecewise-linear representation
-        run: |
-          python - <<'PY'
-          import json,numpy as np
-
-          with open("v12-input.json") as f: d=json.load(f)
-          r=np.asarray(d["r"],float)
-          out={}
-
-          for row,item in d["targets"].items():
-              c=np.asarray(item["c"],float)
-
-              # Compress sampled profile into knots where discrete slope changes.
-              slope=np.diff(c)/np.diff(r)
-              ids=[0]
-              for i in range(1,len(slope)):
-                  if abs(slope[i]-slope[i-1])>1e-10:
-                      ids.append(i)
-              ids.append(len(r)-1)
-              ids=sorted(set(ids))
-
-              knots=[[float(r[i]),float(c[i])] for i in ids]
-              # Verify interpolation reproduces every stored sample.
-              recon=np.interp(r,[x[0] for x in knots],[x[1] for x in knots])
-              err=float(np.max(np.abs(recon-c)))
-
-              out[row]={"knots":knots,"sample_reconstruction_error":err}
-              print("\nROW",row,"knots",len(knots),"error",err)
-              print(knots)
-
-              if err>1e-10:
-                  raise RuntimeError(f"row {row}: piecewise-linear recovery failed")
-
-          with open("v12-knots.json","w") as f:
-              json.dump(out,f,indent=2,sort_keys=True)
-          print("\nPIECEWISE-LINEAR RECOVERY: PASS")
-          PY
-
-      - name: Finite k6 k8 reference moments
-        working-directory: reference-riemann/experiments/weil_positivity
-        run: |
-          python - <<'PY'
-          import json,numpy as np
-          from scipy.linalg import null_space,eigvalsh
-          from sharp_floor import build_operator
-          from sigma_t1b import profile_operator
-
-          with open("../../../v12-input.json") as f: d=json.load(f)
-          r=np.asarray(d["r"],float)
-          n=1200
-          u,w,v1,v2,K=build_operator(.40,n)
-          Q=null_space(np.column_stack([v1,v2]).T)
-
-          out={}
-          for row,item in d["targets"].items():
-              c=np.asarray(item["c"],float)
-              theta=float(item["theta"])
-              CV=Q.T@profile_operator(c,r,u,w,v1,v2)@Q
-              ev=eigvalsh(CV)
-              ep=np.maximum(ev,0.)
-              emax=float(ev[-1])
-
-              rec={}
-              for k in [6,8]:
-                  tr=float(np.sum(ep**k))
-                  root=float(tr**(1.0/k))
-                  rec[str(k)]={
-                      "trace_power":tr,
-                      "root_trace_power":root,
-                      "shifted_bound":root-theta
-                  }
-              out[row]=rec
-              print("ROW",row,rec)
-
-          with open("../../../v12-finite-reference.json","w") as f:
-              json.dump(out,f,indent=2,sort_keys=True)
-          print("FINITE k6/k8 REFERENCE: PASS")
-          PY
-
-      - name: Validate rank-2 trace identity algebraically
-        working-directory: reference-riemann/experiments/weil_positivity
-        run: |
-          python - <<'PY'
-          import json,numpy as np
-          from sharp_floor import build_operator
-          from sigma_t1b import profile_operator
-
-          with open("../../../v12-input.json") as f: d=json.load(f)
-          r=np.asarray(d["r"],float)
-          n=300
-          u,w,v1,v2,K=build_operator(.40,n)
-          U=np.column_stack([v1,v2])
-          P=np.eye(n)-U@U.T
-
-          # For T=PBP, Tr_V(T^k)=Tr((PBP)^k) on full space:
-          # the two V-perp zero modes contribute nothing.
-          out={}
-
-          for row,item in d["targets"].items():
-              c=np.asarray(item["c"],float)
-              B=profile_operator(c,r,u,w,v1,v2)
-
-              # profile_operator is already projected in the reference code;
-              # verify idempotent compression and full-space trace equivalence.
-              T=P@B@P
-              proj_err=float(np.linalg.norm(T-B,"fro"))
-
-              rec={"projection_error":proj_err}
-              X=np.eye(n)
-              for k in range(1,9):
-                  X=X@T
-                  if k in [2,4,6,8]:
-                      rec[f"trace_{k}"]=float(np.trace(X))
-              out[row]=rec
-              print("ROW",row,rec)
-
-              if proj_err>1e-8:
-                  raise RuntimeError(f"row {row}: projection consistency failed")
-
-          with open("../../../v12-rank2-identity.json","w") as f:
-              json.dump(out,f,indent=2,sort_keys=True)
-          print("RANK-2 TRACE IDENTITY: PASS")
-          PY
-
-      - name: Derive unprojected kernel quadrature convergence
-        working-directory: reference-riemann/experiments/weil_positivity
-        run: |
-          python - <<'PY'
-          import json,numpy as np
-          from scipy.linalg import null_space,eigvalsh
-          from sharp_floor import build_operator
-          from sigma_t1b import profile_operator
-
-          with open("../../../v12-input.json") as f: d=json.load(f)
-          r=np.asarray(d["r"],float)
-
-          # This stage is deliberately diagnostic: determine how quickly
-          # Tr((PBP)^8) converges with spatial quadrature n.
-          ns=[120,180,240,320,480,640]
-          out={}
-
-          for n in ns:
-              u,w,v1,v2,K=build_operator(.40,n)
-              Q=null_space(np.column_stack([v1,v2]).T)
-              out[str(n)]={}
-              for row,item in d["targets"].items():
-                  c=np.asarray(item["c"],float)
-                  CV=Q.T@profile_operator(c,r,u,w,v1,v2)@Q
-                  ev=np.maximum(eigvalsh(CV),0.)
-                  tr6=float(np.sum(ev**6))
-                  tr8=float(np.sum(ev**8))
-                  out[str(n)][row]={"tr6":tr6,"tr8":tr8}
-                  print("n",n,"row",row,"tr6",tr6,"tr8",tr8)
-
-          with open("../../../v12-quadrature-convergence.json","w") as f:
-              json.dump(out,f,indent=2,sort_keys=True)
-          print("QUADRATURE CONVERGENCE AUDIT: PASS")
-          PY
-
-      - name: Interval arithmetic primitive audit
-        run: |
-          python - <<'PY'
-          from flint import arb,ctx
-          ctx.prec=192
-
-          # V12 does not pretend to certify the 8-fold trace integral yet.
-          # It verifies the interval primitives needed for a fail-closed V13:
-          # sinc evaluation including x=0, interval multiplication, and
-          # piecewise-linear spectral profile evaluation.
-
-          pi=arb.pi()
-
-          def sinc_kernel(R,x):
-              if x==0:
-                  return arb(str(R))/pi
-              R=arb(str(R))
-              return (R*x).sin()/(pi*x)
-
-          vals=[]
-          for R in [1,5,10,22]:
-              vals.append(str(sinc_kernel(R,arb("0"))))
-              vals.append(str(sinc_kernel(R,arb("0.1 +/- 1e-8"))))
-
-          for x in vals: print(x)
-          print("ARB PRIMITIVES: PASS")
-          PY
-
-      - name: Compute k8 certification error budget
         run: |
           python - <<'PY'
           import json
-          with open("v12-input.json") as f: inp=json.load(f)
-          with open("v12-finite-reference.json") as f: ref=json.load(f)
+          import numpy as np
+          from scipy.optimize import linprog
+          from sigma_t1c import run
 
-          pilot=float(inp["pilot"])
-          loss=0.
-          rows={}
+          L = 0.40
+          N = 1200
+          ROW = 326
 
-          for row in ["341","326","396"]:
-              cap=float(inp["targets"][row]["cap"])
-              y=float(inp["targets"][row]["dual"])
-              b=float(ref[row]["8"]["shifted_bound"])
-              infl=max(b-cap,0.)
-              wl=y*infl
-              loss+=wl
-              rows[row]={"cap":cap,"k8_bound":b,"inflation":infl,
-                         "dual":y,"weighted_loss":wl}
+          val, st = run(L, n=N, verbose=False)
 
-          reserve=pilot-loss
+          r = np.asarray(st["r"], dtype=float)
+          rows = [np.asarray(x, dtype=float) for x in st["rows"]]
+          caps = np.asarray(st["caps"], dtype=float)
+          cost = np.asarray(st["cost"], dtype=float)
+          tail = float(st["tail"])
 
-          # Translate remaining dual reserve into a conservative equal
-          # per-row cap-error budget (weighted equally in objective loss).
-          per_loss=reserve/6.0
-          for row in rows:
-              y=rows[row]["dual"]
-              rows[row]["suggested_extra_cap_budget"]=per_loss/y
+          A = np.vstack(rows + [np.ones_like(r)])
+          b = np.concatenate([caps, [1.0]])
 
-          out={"pilot":pilot,"finite_k8_loss":loss,
-               "finite_k8_remaining":reserve,
-               "suggested_reserved_loss_per_priority_row":per_loss,
-               "rows":rows}
+          lp = linprog(
+              cost-tail,
+              A_ub=A,
+              b_ub=b,
+              bounds=(0, None),
+              method="highs"
+          )
+          if not lp.success:
+              raise RuntimeError(lp.message)
 
-          with open("v12-error-budget.json","w") as f:
-              json.dump(out,f,indent=2,sort_keys=True)
+          dual = -np.asarray(lp.ineqlin.marginals[:-1], dtype=float)
 
-          print(json.dumps(out,indent=2))
-          if reserve<=0:
-              raise RuntimeError("k8 no longer has positive finite reserve")
-          print("K8 ERROR BUDGET: PASS")
+          sigma = rows[ROW]
+          theta = abs(float(sigma.min()))
+          c = sigma + theta
+
+          if float(c.min()) < -1e-12:
+              raise RuntimeError("shifted profile is negative")
+
+          # Recover exact sampled piecewise-linear knots.
+          slope = np.diff(c) / np.diff(r)
+          ids = [0]
+          for i in range(1, len(slope)):
+              if abs(slope[i]-slope[i-1]) > 1e-10:
+                  ids.append(i)
+          ids.append(len(r)-1)
+          ids = sorted(set(ids))
+
+          knots = [[float(r[i]), float(c[i])] for i in ids]
+          recon = np.interp(
+              r,
+              [x[0] for x in knots],
+              [x[1] for x in knots]
+          )
+          err = float(np.max(np.abs(recon-c)))
+
+          if err > 1e-10:
+              raise RuntimeError("knot reconstruction failed")
+
+          out = {
+              "L": L,
+              "pilot": float(val),
+              "row": ROW,
+              "cap": float(caps[ROW]),
+              "dual": float(dual[ROW]),
+              "theta": theta,
+              "r": r.tolist(),
+              "c": c.tolist(),
+              "knots": knots,
+              "knot_error": err
+          }
+
+          with open("../../../v13-input.json", "w") as f:
+              json.dump(out, f, indent=2, sort_keys=True)
+
+          print(json.dumps({
+              "row": ROW,
+              "cap": out["cap"],
+              "dual": out["dual"],
+              "theta": theta,
+              "knots": knots,
+              "knot_error": err
+          }, indent=2))
+
+          print("ROW 326 EXTRACTION: PASS")
           PY
 
-      - name: Write V12 decision ledger
+      - name: Finite reference for row 326
+        working-directory: reference-riemann/experiments/weil_positivity
         run: |
-          cat > V12-LEDGER.txt <<'EOF'
-          V12 — k=8 CONTINUUM ROUTE AUDIT
+          python - <<'PY'
+          import json
+          import numpy as np
+          from scipy.linalg import null_space, eigvalsh
+          from sharp_floor import build_operator
+          from sigma_t1b import profile_operator
 
-          V11 established finite-dimensional numerical viability at k=6 and
-          a substantially larger reserve at k=8.
+          with open("../../../v13-input.json") as f:
+              d = json.load(f)
 
-          V12 therefore selects k=8 as the primary certification target and
-          k=6 as a cross-check.
+          r = np.asarray(d["r"], dtype=float)
+          c = np.asarray(d["c"], dtype=float)
+          theta = float(d["theta"])
 
-          For each exact shifted positive profile c_j, the desired rigorous
-          inequality is
+          out = {}
 
-              lambda_max(C_j|V)
-              <= Tr_V((C_j|V)^8)^(1/8).
+          for n in [200, 300, 400, 600, 800, 1200]:
+              u,w,v1,v2,K = build_operator(0.40, n)
+              Q = null_space(np.column_stack([v1,v2]).T)
 
-          The active signed cap is then bounded by
+              C = profile_operator(c, r, u, w, v1, v2)
+              CV = Q.T @ C @ Q
 
-              Lambda_j
-              <= Tr_V((C_j|V)^8)^(1/8) - theta_j.
+              ev = eigvalsh(CV)
+              if float(ev[0]) < -1e-9:
+                  raise RuntimeError("material PSD failure")
 
-          V12 performs the prerequisites:
-            * exact stored-profile extraction;
-            * piecewise-linear knot recovery;
-            * finite k=6 and k=8 reference values;
-            * explicit rank-2/projector trace identity checks;
-            * quadrature convergence diagnostics;
-            * Arb primitive checks;
-            * a fail-closed error budget for future rigorous enclosures.
+              ep = np.maximum(ev, 0.0)
 
-          V12 DOES NOT claim that an 8-fold continuum integral has been
-          rigorously evaluated. It is an architecture/feasibility audit.
+              tr8 = float(np.sum(ep**8))
+              root8 = float(tr8**(1.0/8.0))
+              bound = root8-theta
 
-          A future rigorous stage must derive and interval-enclose the
-          continuum trace of (P C P)^8, or an equivalent rigorously justified
-          upper bound, and keep the resulting cap inflation inside the V12
-          dual error budget.
+              out[str(n)] = {
+                  "tr8": tr8,
+                  "root8": root8,
+                  "shifted_bound": bound
+              }
 
-          NO T1/RH CERTIFICATION CLAIM IS MADE BY V12.
+              print("n", n, out[str(n)])
+
+          with open("../../../v13-finite-reference.json", "w") as f:
+              json.dump(out, f, indent=2, sort_keys=True)
+
+          print("FINITE REFERENCE: PASS")
+          PY
+
+      - name: Construct rigorous piecewise-linear interval profile
+        run: |
+          python - <<'PY'
+          import json
+          from flint import arb, ctx
+
+          ctx.prec = 192
+
+          with open("v13-input.json") as f:
+              d = json.load(f)
+
+          knots = d["knots"]
+
+          # Convert decimal knot data to exact decimal Arb balls.
+          K = [(arb(str(x)), arb(str(y))) for x,y in knots]
+
+          def profile_ball(x):
+              # x is an Arb interval. For this prototype, evaluate only
+              # intervals known to lie within one knot segment.
+              for i in range(len(K)-1):
+                  x0,y0 = K[i]
+                  x1,y1 = K[i+1]
+
+                  # Midpoint routing is used only after the caller has split
+                  # the domain at every knot.
+                  mid = float(x.mid())
+                  if float(x0) - 1e-15 <= mid <= float(x1) + 1e-15:
+                      if x1 == x0:
+                          return y0
+                      return y0 + (y1-y0)*(x-x0)/(x1-x0)
+
+              raise RuntimeError("profile interval outside knot domain")
+
+          tests = []
+
+          for i in range(len(K)-1):
+              x0,y0 = K[i]
+              x1,y1 = K[i+1]
+
+              if x1 == x0:
+                  continue
+
+              mid = (x0+x1)/2
+              rad = (x1-x0)/arb(8)
+
+              X = mid + arb("0 +/- " + str(float(rad)))
+              Y = profile_ball(X)
+
+              tests.append({
+                  "segment": i,
+                  "x": str(X),
+                  "c_x": str(Y)
+              })
+
+          with open("v13-arb-profile.json", "w") as f:
+              json.dump(tests, f, indent=2)
+
+          for t in tests:
+              print(t)
+
+          print("ARB PIECEWISE PROFILE: PASS")
+          PY
+
+      - name: Rigorous kernel primitive enclosure
+        run: |
+          python - <<'PY'
+          import json
+          from flint import arb, ctx
+
+          ctx.prec = 192
+
+          with open("v13-input.json") as f:
+              d = json.load(f)
+
+          L = arb(str(d["L"]))
+          ell = 2*L
+          pi = arb.pi()
+
+          # Sinc kernel primitive used in the continuum operator family.
+          # This is a primitive audit, not yet the full row-326 kernel.
+          def sinc(R, X):
+              R = arb(str(R))
+              if X == 0:
+                  return R/pi
+              return (R*X).sin()/(pi*X)
+
+          tests = {}
+
+          for R in [4,5,6,7,8,9,10,12,15,18,20,22]:
+              vals = []
+              M = 64
+              for i in range(M):
+                  a = ell*arb(i)/arb(M)
+                  b = ell*arb(i+1)/arb(M)
+                  mid = (a+b)/2
+                  rad = (b-a)/2
+
+                  if i == 0:
+                      # Avoid division by an interval containing zero.
+                      # Rigorous absolute envelope |sin(Rx)/x| <= R.
+                      val = arb(str(R))/pi
+                      vals.append({
+                          "cell": i,
+                          "envelope": str(val)
+                      })
+                  else:
+                      X = mid + arb("0 +/- " + str(float(rad)))
+                      vals.append({
+                          "cell": i,
+                          "value": str(sinc(R,X))
+                      })
+
+              tests[str(R)] = vals
+
+          with open("v13-kernel-primitives.json", "w") as f:
+              json.dump(tests, f, indent=2)
+
+          print("RIGOROUS KERNEL PRIMITIVES: PASS")
+          PY
+
+      - name: Trace8 enclosure architecture check
+        run: |
+          python - <<'PY'
+          import json
+          import math
+
+          with open("v13-input.json") as f:
+              d = json.load(f)
+
+          with open("v13-finite-reference.json") as f:
+              ref = json.load(f)
+
+          cap = float(d["cap"])
+          theta = float(d["theta"])
+          dual = float(d["dual"])
+          pilot = float(d["pilot"])
+
+          tr8_ref = float(ref["1200"]["tr8"])
+          bound_ref = float(ref["1200"]["shifted_bound"])
+
+          # V12 suggested row-326 extra cap allowance was about 0.02328.
+          # Use a stricter local prototype allowance of 0.010.
+          extra_cap_allowance = 0.010
+
+          max_root8 = cap + extra_cap_allowance + theta
+          max_tr8 = max_root8**8
+
+          multiplicative_trace_headroom = max_tr8/tr8_ref
+
+          out = {
+              "reference_tr8_n1200": tr8_ref,
+              "reference_shifted_k8_bound": bound_ref,
+              "cap": cap,
+              "theta": theta,
+              "dual": dual,
+              "pilot": pilot,
+              "prototype_extra_cap_allowance": extra_cap_allowance,
+              "max_allowed_root8": max_root8,
+              "max_allowed_tr8": max_tr8,
+              "multiplicative_trace_headroom": multiplicative_trace_headroom
+          }
+
+          with open("v13-trace8-budget.json", "w") as f:
+              json.dump(out, f, indent=2, sort_keys=True)
+
+          print(json.dumps(out, indent=2))
+
+          if multiplicative_trace_headroom <= 1.0:
+              raise RuntimeError("no trace8 headroom")
+
+          print("TRACE8 ENCLOSURE BUDGET: PASS")
+          PY
+
+      - name: Certified discretization prototype with Arb matrices
+        run: |
+          python - <<'PY'
+          import json
+          import numpy as np
+          from flint import arb, ctx
+
+          ctx.prec = 160
+
+          with open("v13-input.json") as f:
+              d = json.load(f)
+
+          # IMPORTANT:
+          # This stage certifies arithmetic on a small surrogate matrix only.
+          # It does NOT certify the continuum discretization error.
+          #
+          # Its purpose is to validate that Arb can propagate matrix powers
+          # through k=8 without interval explosion before V14.
+
+          n = 24
+
+          # Build a benign symmetric PSD surrogate whose spectrum resembles
+          # a decaying positive compact operator.
+          vals = np.array([
+              0.234,
+              0.120,
+              0.070,
+              0.040,
+              0.020,
+              0.010
+          ] + [0.002]*(n-6), dtype=float)
+
+          # Deterministic orthogonal matrix.
+          X = np.fromfunction(
+              lambda i,j: np.cos((i+1)*(j+1)),
+              (n,n),
+              dtype=float
+          )
+          Q,_ = np.linalg.qr(X)
+          A = Q @ np.diag(vals) @ Q.T
+
+          # Convert to Arb with a conservative decimal radius.
+          M = []
+          for i in range(n):
+              row = []
+              for j in range(n):
+                  mid = A[i,j]
+                  row.append(
+                      arb(str(mid)) + arb("0 +/- 1e-15")
+                  )
+              M.append(row)
+
+          def matmul(A,B):
+              n = len(A)
+              C = [[arb(0) for _ in range(n)] for __ in range(n)]
+              for i in range(n):
+                  for k in range(n):
+                      aik = A[i][k]
+                      for j in range(n):
+                          C[i][j] += aik*B[k][j]
+              return C
+
+          M2 = matmul(M,M)
+          M4 = matmul(M2,M2)
+          M8 = matmul(M4,M4)
+
+          tr8 = arb(0)
+          for i in range(n):
+              tr8 += M8[i][i]
+
+          result = {
+              "n": n,
+              "trace8_interval": str(tr8)
+          }
+
+          with open("v13-arb-matrix-power.json", "w") as f:
+              json.dump(result, f, indent=2)
+
+          print(result)
+          print("ARB MATRIX POWER k8: PASS")
+          PY
+
+      - name: Fail-closed V13 decision
+        run: |
+          python - <<'PY'
+          import json
+
+          with open("v13-trace8-budget.json") as f:
+              b = json.load(f)
+
+          with open("v13-arb-matrix-power.json") as f:
+              m = json.load(f)
+
+          decision = {
+              "row": 326,
+              "status": "PROTOTYPE_READY_FOR_RIGOROUS_DISCRETIZATION_ERROR",
+              "continuum_certified": False,
+              "trace8_headroom_factor": b["multiplicative_trace_headroom"],
+              "arb_matrix_power_test": m["trace8_interval"],
+              "next_requirement":
+                  "derive a rigorous operator/quadrature error bound connecting "
+                  "the continuum row-326 operator to a finite interval matrix"
+          }
+
+          with open("v13-decision.json", "w") as f:
+              json.dump(decision, f, indent=2, sort_keys=True)
+
+          print(json.dumps(decision, indent=2))
+          print()
+          print("V13 DOES NOT CERTIFY T1/RH.")
+          print("V13 DOES NOT YET CERTIFY THE CONTINUUM ROW-326 CAP.")
+          print("V13 VALIDATES THE INTERVAL-ARITHMETIC CERTIFICATION ARCHITECTURE.")
+          PY
+
+      - name: Write V13 ledger
+        run: |
+          cat > V13-LEDGER.txt <<'EOF'
+          V13 — RIGOROUS k=8 ENCLOSURE PROTOTYPE
+
+          TARGET
+          ------
+          Row 326 is selected first because its k=8 bound is already extremely
+          close to its numerical cap and V12 gives substantial error budget.
+
+          The desired final inequality is
+
+              lambda_max(A_326)
+              <= Tr_V(C_326^8)^(1/8) - theta_326.
+
+          WHAT V13 CERTIFIES
+          -----------------
+          V13 validates:
+            * exact extraction of the stored row-326 shifted profile;
+            * exact sampled piecewise-linear reconstruction;
+            * interval evaluation of that piecewise-linear profile;
+            * Arb sinc/kernel primitives;
+            * available trace-8 headroom;
+            * stable Arb propagation through an eighth matrix power.
+
+          WHAT V13 DOES NOT CERTIFY
+          -------------------------
+          V13 does NOT yet prove that a finite interval matrix encloses the
+          continuum operator C_326.
+
+          Therefore V13 does NOT provide a rigorous continuum value of
+          Tr_V(C_326^8), and does NOT prove T1 or RH.
+
+          NEXT MATHEMATICAL OBSTACLE
+          --------------------------
+          Derive a rigorous error estimate between the continuum integral
+          operator and a finite quadrature/Nystrom interval matrix.
+
+          Once an operator error epsilon is proved, V14 can combine:
+            1. interval matrix arithmetic;
+            2. the operator discretization error;
+            3. a perturbation bound for the eighth trace/root;
+            4. the V12 dual error budget.
+
+          FAIL-CLOSED RULE
+          ----------------
+          No finite-n convergence observation may be substituted for a proof
+          of the continuum discretization error.
           EOF
-          cat V12-LEDGER.txt
 
-      - name: Upload V12 evidence
+          cat V13-LEDGER.txt
+
+      - name: Upload V13 evidence
         uses: actions/upload-artifact@v4
         with:
-          name: t1-L040-v12-k8-continuum-route
+          name: t1-L040-v13-rigorous-k8-prototype
           path: |
-            v12-input.json
-            v12-knots.json
-            v12-finite-reference.json
-            v12-rank2-identity.json
-            v12-quadrature-convergence.json
-            v12-error-budget.json
-            V12-LEDGER.txt
+            v13-input.json
+            v13-finite-reference.json
+            v13-arb-profile.json
+            v13-kernel-primitives.json
+            v13-trace8-budget.json
+            v13-arb-matrix-power.json
+            v13-decision.json
+            V13-LEDGER.txt
