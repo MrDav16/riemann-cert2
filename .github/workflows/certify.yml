@@ -1,4 +1,4 @@
-name: T1 L040 V22 Rigorous Finite Spectral Certificate Row326
+name: T1 L040 V22.1 Rigorous Finite Spectral Certificate Row326
 
 on:
   workflow_dispatch:
@@ -218,7 +218,7 @@ jobs:
                "derived_arithmetic_error_allowance":arithmetic,
                "total_E_2_upper_via_inf":total,
                "sigma_min_R_squared_lower":sigma2_lower,
-               "strict_PD_condition":passes,
+               "strict_PD_condition":bool(passes),
                "margin":sigma2_lower-total}
           with open("v22-backward-theorem.json","w") as f:json.dump(out,f,indent=2)
           print(json.dumps(out,indent=2))
@@ -306,16 +306,16 @@ jobs:
                "candidate_shifted_continuum_upper":candidate,
                "allowed_plus_0p010":allowed,
                "remaining_margin":allowed-candidate,
-               "finite_PD_theorem_passes":b["strict_PD_condition"],
+               "finite_PD_theorem_passes":bool(b["strict_PD_condition"]),
                "within_budget":bool(candidate<allowed)}
           with open("v22-assembly.json","w") as f:json.dump(out,f,indent=2)
           print(json.dumps(out,indent=2))
           if not out["finite_PD_theorem_passes"] or not out["within_budget"]:
               raise RuntimeError("V22 assembly failed")
-          print("V22 ASSEMBLY: PASS")
+          print("V22.1 ASSEMBLY: PASS")
           PY
 
-      - name: Fail-closed V22 decision
+      - name: Fail-closed V22.1 decision
         run: |
           python - <<'PY'
           import json
@@ -341,9 +341,9 @@ jobs:
       - name: Write ledger
         run: |
           cat > V22-LEDGER.txt <<'EOF'
-          V22 — RIGOROUS FINITE SPECTRAL CERTIFICATE CANDIDATE, ROW 326
+          V22.1 — RIGOROUS FINITE SPECTRAL CERTIFICATE CANDIDATE, ROW 326
 
-          V22 deliberately spends more of the available error budget to obtain
+          V22.1 deliberately spends more of the available error budget to obtain
           a much easier finite positive-definiteness certificate.
 
           It sets
@@ -370,7 +370,7 @@ jobs:
 
           They are not silently merged or reused.
 
-          V22 STILL DOES NOT SET continuum_certified=true.
+          V22.1 STILL DOES NOT SET continuum_certified=true.
 
           The next stage must be an independent end-to-end audit that attempts
           to falsify the certificate: check every theorem hypothesis, constants,
@@ -382,10 +382,10 @@ jobs:
           NO T1/RH PROOF CLAIM IS MADE.
           EOF
 
-      - name: Upload V22 evidence
+      - name: Upload V22.1 evidence
         uses: actions/upload-artifact@v4
         with:
-          name: t1-L040-v22-rigorous-finite-row326
+          name: t1-L040-v221-rigorous-finite-row326
           path: |
             v22-input.json
             v22-witness.json
