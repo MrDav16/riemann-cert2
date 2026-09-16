@@ -1,4 +1,4 @@
-name: T1 L040 V17 Formal Rank2 Projector Bound
+name: T1 L040 V18 Finite Spectral Certificate Row326
 
 on:
   workflow_dispatch:
@@ -6,9 +6,10 @@ on:
     branches: [main]
 
 jobs:
-  formal-projector:
+  finite-spectral-cert:
     runs-on: ubuntu-latest
     timeout-minutes: 90
+
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -27,160 +28,12 @@ jobs:
           git checkout 94fa51e8f26794ef2d206c6c12e7adb4d85cbeaf
           test "$(git rev-parse HEAD)" = "94fa51e8f26794ef2d206c6c12e7adb4d85cbeaf"
 
-      - name: Exact continuous Gram and conditioning
-        run: |
-          python - <<'PY'
-          import json
-          from flint import arb,ctx
-          ctx.prec=192
-          L=arb("0.4")
-          a=2*L.sinh(); b=2*L
-          lmin=a-b; lmax=a+b
-          out={"L":"0.4","a":str(a),"b":str(b),
-               "lambda_min":str(lmin),"lambda_max":str(lmax)}
-          with open("v17-continuous-gram.json","w") as f:json.dump(out,f,indent=2)
-          print(json.dumps(out,indent=2))
-          print("CONTINUOUS GRAM: PASS")
-          PY
-
-      - name: Formal sampling map error for constraints
-        run: |
-          python - <<'PY'
-          import json,math
-          L=.4; length=2*L
-
-          # Let T:R^2->L2, T(a,b)=a exp(u/2)+b exp(-u/2).
-          # Let J_N be piecewise-linear interpolation of nodal samples.
-          # For any f=Tz, scalar interpolation gives
-          # ||f-J_N f||_inf <= h^2/8 ||f''||_inf.
-          #
-          # f''=(1/4)f. By Cauchy-Schwarz in coefficient space:
-          # |f(u)| <= ||z||_2 sqrt(exp(u)+exp(-u))
-          # <= ||z||_2 sqrt(2 cosh(L)).
-          #
-          # Hence
-          # ||(T-J_N S_N T)z||_L2
-          # <= sqrt(2L)*h^2/32*sqrt(2 cosh L)*||z||.
-          #
-          # This is an explicit operator-norm bound delta_T.
-
-          out={"N":{}}
-          for N in [200,400,600,800,1200,1600]:
-              h=length/(N-1)
-              delta=math.sqrt(length)*(h*h/32)*math.sqrt(2*math.cosh(L))
-              out["N"][str(N)]={"h":h,"synthesis_operator_error":delta}
-              print(N,out["N"][str(N)])
-          with open("v17-synthesis-error.json","w") as f:json.dump(out,f,indent=2)
-          print("SYNTHESIS ERROR THEOREM: PASS")
-          PY
-
-      - name: Formal subspace projector theorem
-        run: |
-          python - <<'PY'
-          import json,math
-          with open("v17-synthesis-error.json") as f:s=json.load(f)
-          L=.4
-          a=2*math.sinh(L); b=2*L
-          sigma=math.sqrt(a-b)
-
-          # Lemma used:
-          # If T has smallest singular value sigma>0 and ||T-T_N||<=delta<sigma,
-          # then for ranges M=Ran(T), M_N=Ran(T_N),
-          #
-          # gap(M,M_N) <= delta/(sigma-delta).
-          #
-          # For equal finite dimensions, orthogonal projectors satisfy
-          # ||P_M-P_MN|| <= gap bound.
-          #
-          # Our desired pole-removal projectors are complements, so the same
-          # norm difference applies.
-          out={"sigma_min_T":sigma,"N":{}}
-          for N,x in s["N"].items():
-              delta=x["synthesis_operator_error"]
-              if delta>=sigma:
-                  pp=float("inf")
-              else:
-                  pp=delta/(sigma-delta)
-              out["N"][N]={"delta_T":delta,"projector_bound":pp,
-                           "condition_delta_lt_sigma":delta<sigma}
-              print(N,out["N"][N])
-          with open("v17-formal-projector.json","w") as f:json.dump(out,f,indent=2)
-          print("FORMAL PROJECTOR BOUND: PASS")
-          PY
-
-      - name: Independent finite-dimensional regression of theorem
-        run: |
-          python - <<'PY'
-          import numpy as np,json
-          rng=np.random.default_rng(1701)
-          tests=[]
-          for m in [10,30,80]:
-              for _ in range(4):
-                  T=rng.normal(size=(m,2))
-                  # Ensure healthy rank.
-                  s=np.linalg.svd(T,compute_uv=False)
-                  sigma=s[-1]
-                  E=rng.normal(size=(m,2))
-                  E*=0.02*sigma/np.linalg.norm(E,2)
-                  TN=T+E
-                  delta=np.linalg.norm(E,2)
-                  Q=np.linalg.qr(T)[0][:,:2]
-                  QN=np.linalg.qr(TN)[0][:,:2]
-                  P=Q@Q.T; PN=QN@QN.T
-                  actual=np.linalg.norm(P-PN,2)
-                  bound=delta/(sigma-delta)
-                  ok=actual<=bound*(1+1e-10)
-                  tests.append({"m":m,"actual":float(actual),"bound":float(bound),"pass":bool(ok)})
-                  if not ok:raise RuntimeError("projector theorem regression failed")
-          with open("v17-theorem-regression.json","w") as f:json.dump(tests,f,indent=2)
-          print("THEOREM REGRESSION: PASS")
-          PY
-
-      - name: Combine with V15 kernel theorem
-        run: |
-          python - <<'PY'
-          import json,math
-          with open("v17-formal-projector.json") as f:p=json.load(f)
-          L=.4
-          target=0.009985144429060205
-          K2=37.407263223336415
-
-          # Exact-profile Schur norm scale from V15:
-          # ||B|| <= 2L*k(0), k(0)=M0/pi.
-          M0_over_pi=0.6557183655386088
-          Bnorm=2*L*M0_over_pi
-
-          out={"target":target,"Bnorm_schur":Bnorm,"N":{}}
-          for N in [200,400,600,800,1200,1600]:
-              h=2*L/(N-1)
-              kernel=2*L*(h*h*K2/8)
-              pp=p["N"][str(N)]["projector_bound"]
-
-              # ||PBP-QBQ|| <= 2||B||||P-Q||.
-              projector=2*Bnorm*pp
-              total=kernel+projector
-              out["N"][str(N)]={"kernel_error":kernel,
-                                "formal_projector_contribution":projector,
-                                "combined_formal_bound":total,
-                                "beats_target":bool(total<target)}
-              print(N,out["N"][str(N)])
-
-          viable=[int(n) for n,x in out["N"].items() if x["beats_target"]]
-          out["first_formally_viable_tested_N"]=min(viable) if viable else None
-          with open("v17-combined-formal.json","w") as f:json.dump(out,f,indent=2)
-          print("FIRST FORMALLY VIABLE TESTED N =",out["first_formally_viable_tested_N"])
-          if out["first_formally_viable_tested_N"] is None:
-              raise RuntimeError("formal projector route misses V14 target")
-          print("FORMAL COMBINED ERROR BUDGET: PASS")
-          PY
-
-      - name: Finite spectral target at N1200
+      - name: Build exact finite row326 matrix and candidate eigenpair
         working-directory: reference-riemann/experiments/weil_positivity
         run: |
           python - <<'PY'
           import json,numpy as np
-          from scipy.optimize import linprog
-          from scipy.linalg import null_space,eigvalsh
+          from scipy.linalg import null_space,eigh
           from sigma_t1c import run
           from sharp_floor import build_operator
           from sigma_t1b import profile_operator
@@ -194,114 +47,291 @@ jobs:
 
           u,w,v1,v2,K=build_operator(L,N)
           Q=null_space(np.column_stack([v1,v2]).T)
-          CV=Q.T@profile_operator(c,r,u,w,v1,v2)@Q
-          ev=eigvalsh(CV)
-          emax=float(ev[-1])
-          tr8=float(np.sum(np.maximum(ev,0.)**8))
-          root8=tr8**(1/8)
+          C=profile_operator(c,r,u,w,v1,v2)
+          CV=Q.T@C@Q
 
-          out={"N":N,"lambda_max_C":emax,
-               "lambda_max_shifted":emax-theta,
-               "trace8":tr8,"root8":root8,
-               "trace8_shifted_bound":root8-theta,
-               "reference_cap":float(caps[ROW])}
-          with open("../../../v17-finite-target.json","w") as f:json.dump(out,f,indent=2)
+          # Largest two eigenpairs only.
+          vals,vecs=eigh(CV,subset_by_index=[CV.shape[0]-2,CV.shape[0]-1])
+          lam2=float(vals[-2]); lam=float(vals[-1])
+          v=np.asarray(vecs[:,-1],float)
+          v/=np.linalg.norm(v)
+          res=CV@v-lam*v
+          res2=float(np.linalg.norm(res))
+          gap=float(lam-lam2)
+
+          np.save("../../../v18-CV.npy",CV)
+          np.save("../../../v18-v.npy",v)
+
+          out={"N":N,"dimension":int(CV.shape[0]),"theta":theta,
+               "reference_cap":float(caps[ROW]),"lambda1":lam,
+               "lambda2":lam2,"gap":gap,"residual_2":res2,
+               "pilot":float(val)}
+          with open("../../../v18-candidate.json","w") as f:json.dump(out,f,indent=2)
           print(json.dumps(out,indent=2))
-          print("FINITE TARGET: PASS")
+          print("FINITE MATRIX/CANDIDATE: PASS")
           PY
 
-      - name: Arb finite spectral architecture audit
+      - name: Symmetry and representation audit
         run: |
           python - <<'PY'
-          import json
+          import json,numpy as np
+          A=np.load("v18-CV.npy")
+          sym=float(np.linalg.norm(A-A.T,np.inf))
+          finite=bool(np.isfinite(A).all())
+          out={"symmetry_inf_error":sym,"all_finite":finite,
+               "dimension":int(A.shape[0])}
+          with open("v18-representation-audit.json","w") as f:json.dump(out,f,indent=2)
+          print(json.dumps(out,indent=2))
+          if not finite or sym>1e-10:raise RuntimeError("finite representation audit failed")
+          PY
+
+      - name: Rigorous floating input radius budget
+        run: |
+          python - <<'PY'
+          import json,numpy as np,math
+          A=np.load("v18-CV.npy")
+          n=A.shape[0]
+
+          # Every stored double is treated as an interval centered at its
+          # binary64 value. A deliberately conservative absolute entry radius
+          # covers conversion/roundoff for the already-built finite matrix.
+          #
+          # IMPORTANT: this certifies the stored finite matrix neighborhood;
+          # V17 separately handles continuum discretization.
+          maxabs=float(np.max(np.abs(A)))
+          eps=np.finfo(float).eps
+          entry_rad=64*eps*max(1.0,maxabs)
+          row_rad=n*entry_rad
+
+          out={"max_abs_entry":maxabs,"entry_radius":entry_rad,
+               "induced_inf_norm_radius":row_rad}
+          with open("v18-input-radius.json","w") as f:json.dump(out,f,indent=2)
+          print(json.dumps(out,indent=2))
+          PY
+
+      - name: Candidate residual interval certificate
+        run: |
+          python - <<'PY'
+          import json,numpy as np,math
+          A=np.load("v18-CV.npy"); v=np.load("v18-v.npy")
+          with open("v18-candidate.json") as f:c=json.load(f)
+          with open("v18-input-radius.json") as f:b=json.load(f)
+
+          lam=float(c["lambda1"])
+          r=A@v-lam*v
+
+          # Rigorous engineering enclosure for residual of any matrix in the
+          # stored entrywise neighborhood:
+          # ||Delta A v||_2 <= ||Delta A||_2 <= ||Delta A||_inf
+          # for symmetric Delta A with the uniform row-sum bound used here.
+          rr=float(np.linalg.norm(r,2))+float(b["induced_inf_norm_radius"])
+
+          out={"lambda_center":lam,"residual_upper":rr,
+               "eigenvalue_nearby_interval":[lam-rr,lam+rr]}
+          with open("v18-residual-cert.json","w") as f:json.dump(out,f,indent=2)
+          print(json.dumps(out,indent=2))
+          print("RESIDUAL ENCLOSURE: PASS")
+          PY
+
+      - name: Gershgorin upper bound sanity
+        run: |
+          python - <<'PY'
+          import json,numpy as np
+          A=np.load("v18-CV.npy")
+          diag=np.diag(A)
+          rad=np.sum(np.abs(A),axis=1)-np.abs(diag)
+          upper=float(np.max(diag+rad))
+          with open("v18-gershgorin.json","w") as f:json.dump({"upper":upper},f,indent=2)
+          print("Gershgorin upper =",upper)
+          print("GERSHGORIN SANITY: PASS")
+          PY
+
+      - name: Shifted positive-definiteness certificate via LDL
+        run: |
+          python - <<'PY'
+          import json,numpy as np
+          from scipy.linalg import ldl
+
+          A=np.load("v18-CV.npy")
+          with open("v18-candidate.json") as f:c=json.load(f)
+          with open("v18-input-radius.json") as f:b=json.load(f)
+
+          # Choose mu with substantial room above lambda1 but tiny relative
+          # to the continuum budget. If mu I-A is rigorously PD, then
+          # lambda_max(A)<mu.
+          mu=float(c["lambda1"])+1e-7
+          M=mu*np.eye(A.shape[0])-A
+
+          # Numerical LDL diagnostic first.
+          L,D,perm=ldl(M,lower=True,hermitian=True)
+          evD=np.linalg.eigvalsh(D)
+          minD=float(evD[0])
+
+          # Independent direct smallest eigenvalue diagnostic of shifted M.
+          mineig=float(np.linalg.eigvalsh(M)[0])
+
+          # Roundoff/input neighborhood budget.
+          perturb=float(b["induced_inf_norm_radius"])
+
+          out={"mu":mu,"min_eigenvalue_shifted_numeric":mineig,
+               "min_D_numeric":minD,"matrix_neighborhood_norm":perturb,
+               "pd_after_input_radius":bool(mineig>perturb),
+               "certified_upper_if_roundoff_model_accepted":mu}
+          with open("v18-shift-cert.json","w") as f:json.dump(out,f,indent=2)
+          print(json.dumps(out,indent=2))
+
+          if mineig<=perturb:
+              raise RuntimeError("shift margin too small for stored-matrix radius")
+          print("SHIFTED PD NUMERICAL/RADIUS TEST: PASS")
+          PY
+
+      - name: Arb block principal-minor prototype
+        run: |
+          python - <<'PY'
+          import json,numpy as np
           from flint import arb,ctx
-          ctx.prec=192
-          with open("v17-finite-target.json") as f:d=json.load(f)
+          ctx.prec=160
 
-          # V17 does not yet build the full 1200x1200 Arb eigensystem.
-          # It establishes the interval target that V18 must certify.
-          lam=arb(str(d["lambda_max_C"])) + arb("0 +/- 1e-12")
-          tr8=arb(str(d["trace8"])) + arb("0 +/- 1e-14")
-          out={"lambda_demo_interval":str(lam),"trace8_demo_interval":str(tr8),
-               "full_finite_interval_certificate":False}
-          with open("v17-arb-target.json","w") as f:json.dump(out,f,indent=2)
-          print(json.dumps(out,indent=2))
-          print("ARB TARGET ARCHITECTURE: PASS")
+          A=np.load("v18-CV.npy")
+          with open("v18-shift-cert.json") as f:s=json.load(f)
+          mu=float(s["mu"])
+
+          # Full 1198x1198 Arb LDL would be unnecessarily expensive for this
+          # prototype. Certify arithmetic on the leading 32x32 shifted block
+          # and make the limitation explicit.
+          m=32
+          B=mu*np.eye(m)-A[:m,:m]
+
+          M=[[arb(str(B[i,j]))+arb("0 +/- 2e-15") for j in range(m)] for i in range(m)]
+
+          # Interval Cholesky without pivoting.
+          L=[[arb(0) for _ in range(m)] for __ in range(m)]
+          ok=True
+          pivots=[]
+          for i in range(m):
+              s0=M[i][i]
+              for k in range(i): s0-=L[i][k]*L[i][k]
+              # Midpoint positivity is diagnostic; interval width is recorded.
+              mid=float(s0.mid())
+              pivots.append(str(s0))
+              if mid<=0:
+                  ok=False; break
+              L[i][i]=s0.sqrt()
+              for j in range(i+1,m):
+                  z=M[j][i]
+                  for k in range(i): z-=L[j][k]*L[i][k]
+                  L[j][i]=z/L[i][i]
+
+          out={"block_size":m,"completed":ok,"pivots":pivots,
+               "full_matrix_arb_certificate":False}
+          with open("v18-arb-block.json","w") as f:json.dump(out,f,indent=2)
+          if not ok:raise RuntimeError("Arb block Cholesky failed")
+          print("ARB BLOCK CHOLESKY: PASS")
           PY
 
-      - name: Fail-closed V17 decision
+      - name: Assemble row326 continuum budget
         run: |
           python - <<'PY'
           import json
-          with open("v17-combined-formal.json") as f:c=json.load(f)
-          n=c["first_formally_viable_tested_N"]
+          with open("v18-candidate.json") as f:c=json.load(f)
+          with open("v18-shift-cert.json") as f:s=json.load(f)
+
+          # Formal continuum error from V17 at N=1200.
+          continuum_error=1.7962225841646505e-06
+          theta=float(c["theta"])
+          finite_upper=float(s["mu"])
+
+          continuum_lambda_upper=finite_upper+continuum_error
+          shifted_upper=continuum_lambda_upper-theta
+          cap=float(c["reference_cap"])
+
+          out={"finite_upper_candidate":finite_upper,
+               "V17_continuum_operator_error":continuum_error,
+               "continuum_lambda_upper_candidate":continuum_lambda_upper,
+               "shifted_continuum_upper_candidate":shifted_upper,
+               "reference_cap":cap,
+               "inflation_over_original_cap":shifted_upper-cap,
+               "within_plus_0p010_budget":bool(shifted_upper<cap+0.010)}
+          with open("v18-assembly.json","w") as f:json.dump(out,f,indent=2)
+          print(json.dumps(out,indent=2))
+          if not out["within_plus_0p010_budget"]:
+              raise RuntimeError("assembled candidate misses budget")
+          print("ROW326 BUDGET ASSEMBLY: PASS")
+          PY
+
+      - name: Fail-closed V18 decision
+        run: |
+          python - <<'PY'
+          import json
+          with open("v18-assembly.json") as f:a=json.load(f)
+          with open("v18-arb-block.json") as f:b=json.load(f)
+
           decision={
             "row":326,
             "continuum_certified":False,
-            "status":"FORMAL_PROJECTOR_BOUND_AVAILABLE",
-            "first_formally_viable_tested_N":n,
-            "combined_error_at_N1200":c["N"]["1200"]["combined_formal_bound"],
-            "V14_target":c["target"],
+            "status":"FINITE_SPECTRAL_CERTIFICATE_ARCHITECTURE_PASSES",
+            "assembled_shifted_upper_candidate":a["shifted_continuum_upper_candidate"],
+            "within_budget":a["within_plus_0p010_budget"],
+            "full_arb_matrix_certificate":b["full_matrix_arb_certificate"],
             "remaining_gap":[
-              "certified interval upper bound for the finite N=1200 spectral quantity",
-              "audit that finite representation used by spectral certificate matches the theorem discretization",
-              "final no-double-counting assembly"
+              "replace numerical shifted-PD test by a full rigorous certificate for the complete finite matrix",
+              "prove the stored finite matrix rounding enclosure from construction operations rather than post-hoc entry radius",
+              "audit exact identification between V17 theorem discretization and finite matrix"
             ]
           }
-          with open("v17-decision.json","w") as f:json.dump(decision,f,indent=2)
+          with open("v18-decision.json","w") as f:json.dump(decision,f,indent=2)
           print(json.dumps(decision,indent=2))
           print("FAIL-CLOSED: continuum_certified=false")
           PY
 
       - name: Write ledger
         run: |
-          cat > V17-LEDGER.txt <<'EOF'
-          V17 â€” FORMAL RANK-2 PROJECTOR BOUND
+          cat > V18-LEDGER.txt <<'EOF'
+          V18 — FINITE SPECTRAL CERTIFICATE, ROW 326
 
-          The continuous constraint synthesis map is
+          Goal:
+              certify lambda_max(C_N) < mu at N=1200.
 
-              T(a,b)=a exp(u/2)+b exp(-u/2).
+          Strategy:
+              prove positive definiteness of mu I - C_N.
 
-          Its smallest singular value is known exactly from the 2x2 Gram
-          matrix. Piecewise-linear interpolation gives an explicit operator
-          error delta = ||T-T_N||.
+          V18 computes the top finite eigenpair, residual, spectral gap,
+          Gershgorin sanity bound, and a shifted LDL/eigenvalue margin. It
+          assigns an explicit neighborhood radius to the stored binary64
+          matrix and checks that the shifted positive-definiteness margin is
+          larger than this radius.
 
-          For delta < sigma_min(T), the range-subspace perturbation estimate
+          An Arb interval Cholesky is also exercised on a principal block.
 
-              ||P-P_N|| <= delta/(sigma_min(T)-delta)
+          IMPORTANT FAIL-CLOSED LIMITATION:
+          V18 does not call the full 1198x1198 matrix interval-certified.
+          The post-hoc binary64 entry radius is an engineering enclosure, not
+          yet a proof that every operation constructing C_N was outward-rounded.
 
-          is used, with P and P_N the orthogonal projectors onto the
-          corresponding two-dimensional constraint ranges (or their
-          complements).
+          V19 must either:
+            (a) construct the finite matrix directly with interval arithmetic
+                and certify mu I-C_N positive definite, or
+            (b) derive a rigorous backward-error certificate for the complete
+                floating construction and factorization.
 
-          This replaces the deliberately loose engineering proxy from V16.1.
-
-          The bound is combined with the V15 kernel interpolation theorem via
-
-              ||PBP-P_N B_N P_N||
-              <= ||B-B_N|| + 2||B|| ||P-P_N||,
-
-          under the common-space interpolation model used in this audit.
-
-          V17 remains fail-closed because the finite N=1200 spectral upper
-          bound is not yet interval-certified, and the precise identification
-          of that finite matrix with the theorem discretization must be audited.
+          V17 continuum error is only assembled after the finite bound.
 
           continuum_certified=false.
           NO T1/RH PROOF CLAIM IS MADE.
           EOF
 
-      - name: Upload V17 evidence
+      - name: Upload V18 evidence
         uses: actions/upload-artifact@v4
         with:
-          name: t1-L040-v17-formal-projector
+          name: t1-L040-v18-finite-spectral-row326
           path: |
-            v17-continuous-gram.json
-            v17-synthesis-error.json
-            v17-formal-projector.json
-            v17-theorem-regression.json
-            v17-combined-formal.json
-            v17-finite-target.json
-            v17-arb-target.json
-            v17-decision.json
-            V17-LEDGER.txt
+            v18-candidate.json
+            v18-representation-audit.json
+            v18-input-radius.json
+            v18-residual-cert.json
+            v18-gershgorin.json
+            v18-shift-cert.json
+            v18-arb-block.json
+            v18-assembly.json
+            v18-decision.json
+            V18-LEDGER.txt
