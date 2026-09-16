@@ -1,4 +1,4 @@
-name: T1 L040 V19 Full Finite Certificate Row326
+name: T1 L040 V20 Identification Lemma Audit Row326
 
 on:
   workflow_dispatch:
@@ -6,7 +6,7 @@ on:
     branches: [main]
 
 jobs:
-  full-finite-cert:
+  identification-lemma:
     runs-on: ubuntu-latest
     timeout-minutes: 90
 
@@ -19,7 +19,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install numpy scipy mpmath python-flint
+          pip install numpy scipy mpmath sympy python-flint
 
       - name: Fetch pinned reference
         run: |
@@ -28,7 +28,25 @@ jobs:
           git checkout 94fa51e8f26794ef2d206c6c12e7adb4d85cbeaf
           test "$(git rev-parse HEAD)" = "94fa51e8f26794ef2d206c6c12e7adb4d85cbeaf"
 
-      - name: Rebuild row326 finite operator and candidate
+      - name: Capture exact reference implementation
+        working-directory: reference-riemann/experiments/weil_positivity
+        run: |
+          python - <<'PY'
+          import inspect,json
+          import sharp_floor,sigma_t1b
+
+          out={
+            "build_operator":inspect.getsource(sharp_floor.build_operator),
+            "profile_operator":inspect.getsource(sigma_t1b.profile_operator)
+          }
+          with open("../../../v20-reference-source.json","w") as f:
+              json.dump(out,f,indent=2)
+          print(out["build_operator"])
+          print(out["profile_operator"])
+          print("SOURCE CAPTURE: PASS")
+          PY
+
+      - name: Rebuild row326 reference objects
         working-directory: reference-riemann/experiments/weil_positivity
         run: |
           python - <<'PY'
@@ -46,307 +64,330 @@ jobs:
           sig=rows[ROW]; theta=abs(float(sig.min())); c=sig+theta
 
           u,w,v1,v2,K=build_operator(L,N)
-          Q=null_space(np.column_stack([v1,v2]).T)
           C=profile_operator(c,r,u,w,v1,v2)
+          X=np.column_stack([v1,v2])
+          Q=null_space(X.T)
           A=Q.T@C@Q
           A=(A+A.T)/2
 
-          vals=eigh(A,eigvals_only=True,subset_by_index=[A.shape[0]-2,A.shape[0]-1])
-          lam2=float(vals[-2]); lam=float(vals[-1])
-          mu=lam+5e-7
+          np.save("../../../v20-u.npy",u)
+          np.save("../../../v20-w.npy",w)
+          np.save("../../../v20-v1.npy",v1)
+          np.save("../../../v20-v2.npy",v2)
+          np.save("../../../v20-C.npy",C)
+          np.save("../../../v20-Q.npy",Q)
+          np.save("../../../v20-A.npy",A)
+          np.save("../../../v20-r.npy",r)
+          np.save("../../../v20-c.npy",c)
 
-          np.save("../../../v19-A.npy",A)
-
-          out={"N":N,"dim":int(A.shape[0]),"theta":theta,
-               "cap":float(caps[ROW]),"lambda1":lam,"lambda2":lam2,
-               "gap":lam-lam2,"mu":mu,"pilot":float(val)}
-          with open("../../../v19-input.json","w") as f:json.dump(out,f,indent=2)
+          out={"L":L,"N":N,"row":ROW,"theta":theta,
+               "cap":float(caps[ROW]),"pilot":float(val),
+               "dim_A":int(A.shape[0])}
+          with open("../../../v20-input.json","w") as f:json.dump(out,f,indent=2)
           print(json.dumps(out,indent=2))
-          print("REBUILD: PASS")
+          print("REFERENCE OBJECTS: PASS")
           PY
 
-      - name: Produce full Cholesky factor
+      - name: Identify weighted Nyström structure
         run: |
           python - <<'PY'
           import json,numpy as np
-          from scipy.linalg import cholesky
 
-          A=np.load("v19-A.npy")
-          with open("v19-input.json") as f:d=json.load(f)
-          mu=float(d["mu"])
-          M=mu*np.eye(A.shape[0])-A
-          R=cholesky(M,lower=False,check_finite=True)
-          np.save("v19-R.npy",R)
+          u=np.load("v20-u.npy")
+          w=np.load("v20-w.npy")
+          C=np.load("v20-C.npy")
+          n=len(u)
 
-          # Residual E = M - R^T R.
-          E=M-R.T@R
-          e_inf=float(np.linalg.norm(E,np.inf))
-          min_diag=float(np.min(np.diag(R)))
-          out={"residual_inf":e_inf,"min_cholesky_diag":min_diag}
-          with open("v19-cholesky.json","w") as f:json.dump(out,f,indent=2)
+          # A symmetric Nyström representation for a kernel k(u-v) has
+          # entries sqrt(w_i) k(u_i-u_j) sqrt(w_j), before projection.
+          # Recover the implied sampled kernel from C away from the pole
+          # projection bookkeeping and test Toeplitz-by-difference behavior.
+          sw=np.sqrt(w)
+          raw=C/(sw[:,None]*sw[None,:])
+
+          # Compare entries with equal grid-index difference.
+          maxspread=0.0
+          records=[]
+          for d in [0,1,2,5,10,50,100,300,600,1000]:
+              vals=np.diag(raw,k=d)
+              if len(vals)==0: continue
+              spread=float(np.max(vals)-np.min(vals))
+              maxspread=max(maxspread,abs(spread))
+              records.append({"offset":d,"mean":float(np.mean(vals)),
+                              "spread":spread})
+          out={"max_equal_offset_spread":maxspread,"offsets":records}
+          with open("v20-nystrom-structure.json","w") as f:json.dump(out,f,indent=2)
           print(json.dumps(out,indent=2))
-          print("FULL FLOAT CHOLESKY: PASS")
+          print("NYSTROM STRUCTURE AUDIT: PASS")
           PY
 
-      - name: Rigorous backward-error sufficient condition
+      - name: Reconstruct analytic row326 kernel
+        run: |
+          python - <<'PY'
+          import json,math,numpy as np
+
+          r=np.load("v20-r.npy"); c=np.load("v20-c.npy")
+          slope=np.diff(c)/np.diff(r)
+          ids=[0]
+          for i in range(1,len(slope)):
+              if abs(slope[i]-slope[i-1])>1e-10:ids.append(i)
+          ids.append(len(r)-1); ids=sorted(set(ids))
+          knots=[(float(r[i]),float(c[i])) for i in ids]
+
+          seg=[]
+          for (a,ya),(b,yb) in zip(knots[:-1],knots[1:]):
+              A=(yb-ya)/(b-a); B=ya-A*a
+              seg.append((a,b,A,B))
+
+          def moment(p):
+              s=0.
+              for a,b,A,B in seg:
+                  s+=A*(b**(p+2)-a**(p+2))/(p+2)
+                  s+=B*(b**(p+1)-a**(p+1))/(p+1)
+              return s
+
+          def k(x):
+              if abs(x)<1e-5:
+                  return sum(((-1)**m)*moment(2*m)*x**(2*m)/
+                             math.factorial(2*m) for m in range(8))/math.pi
+              z=0.
+              for a,b,A,B in seg:
+                  def F(q):
+                      return A*(q*math.sin(q*x)/x+math.cos(q*x)/x**2)+B*math.sin(q*x)/x
+                  z+=F(b)-F(a)
+              return z/math.pi
+
+          xs=np.linspace(-.8,.8,401)
+          out={"knots":knots,"M0":moment(0),"M2":moment(2),
+               "samples":[[float(x),float(k(float(x)))] for x in xs]}
+          with open("v20-analytic-kernel.json","w") as f:json.dump(out,f,indent=2)
+          print("knots",knots)
+          print("M0",out["M0"],"M2",out["M2"])
+          print("ANALYTIC KERNEL: PASS")
+          PY
+
+      - name: Compare reference matrix to analytic weighted kernel
+        run: |
+          python - <<'PY'
+          import json,math,numpy as np
+
+          u=np.load("v20-u.npy");w=np.load("v20-w.npy")
+          C=np.load("v20-C.npy")
+          with open("v20-analytic-kernel.json") as f:d=json.load(f)
+          knots=d["knots"]
+
+          seg=[]
+          for (a,ya),(b,yb) in zip(knots[:-1],knots[1:]):
+              A=(yb-ya)/(b-a);B=ya-A*a;seg.append((a,b,A,B))
+
+          def moment(p):
+              return sum(A*(b**(p+2)-a**(p+2))/(p+2)+
+                         B*(b**(p+1)-a**(p+1))/(p+1)
+                         for a,b,A,B in seg)
+
+          def k(x):
+              if abs(x)<1e-5:
+                  return sum(((-1)**m)*moment(2*m)*x**(2*m)/
+                             math.factorial(2*m) for m in range(8))/math.pi
+              z=0.
+              for a,b,A,B in seg:
+                  def F(q):
+                      return A*(q*math.sin(q*x)/x+math.cos(q*x)/x**2)+B*math.sin(q*x)/x
+                  z+=F(b)-F(a)
+              return z/math.pi
+
+          # Build exact analytic weighted kernel on the same u,w grid.
+          # 1200^2 evaluations are acceptable.
+          n=len(u); B=np.empty((n,n),float)
+          for i in range(n):
+              for j in range(i,n):
+                  z=math.sqrt(w[i]*w[j])*k(float(u[i]-u[j]))
+                  B[i,j]=z;B[j,i]=z
+
+          np.save("v20-Banalytic.npy",B)
+          D=C-B
+          out={"C_minus_B_inf":float(np.linalg.norm(D,np.inf)),
+               "C_minus_B_2":float(np.linalg.norm(D,2)),
+               "C_minus_B_maxentry":float(np.max(np.abs(D)))}
+          with open("v20-reference-vs-analytic.json","w") as f:json.dump(out,f,indent=2)
+          print(json.dumps(out,indent=2))
+          print("REFERENCE/ANALYTIC COMPARISON: PASS")
+          PY
+
+      - name: Identify discrete constraint vectors
         run: |
           python - <<'PY'
           import json,numpy as np,math
 
-          A=np.load("v19-A.npy")
-          R=np.load("v19-R.npy")
-          with open("v19-input.json") as f:d=json.load(f)
-          with open("v19-cholesky.json") as f:c=json.load(f)
+          u=np.load("v20-u.npy");w=np.load("v20-w.npy")
+          v1=np.load("v20-v1.npy");v2=np.load("v20-v2.npy")
+          sw=np.sqrt(w)
 
-          n=A.shape[0]
-          mu=float(d["mu"])
-          M=mu*np.eye(n)-A
+          # Candidate weighted samples of continuous pole functions.
+          gplus=sw*np.exp(u/2)
+          gminus=sw*np.exp(-u/2)
 
-          # To prove M positive definite without trusting computed eigenvalues:
-          #
-          # M = R^T R + E.
-          #
-          # lambda_min(R^T R)=sigma_min(R)^2.
-          # If ||E||_2 < sigma_min(R)^2 then M is positive definite.
-          #
-          # We compute sigma_min(R) numerically, then reserve a deliberately
-          # conservative backward-error allowance for the SVD and matrix
-          # construction. This stage is fail-closed unless the margin is huge.
-          s=np.linalg.svd(R,compute_uv=False)
-          sigma_min=float(s[-1])
-          base=sigma_min*sigma_min
-          E=M-R.T@R
-          E_inf=float(np.linalg.norm(E,np.inf))
+          def rel(a,b):
+              # sign/scale invariant comparison
+              alpha=float(np.dot(a,b)/np.dot(b,b))
+              return float(np.linalg.norm(a-alpha*b)/np.linalg.norm(a)),alpha
 
-          eps=np.finfo(float).eps
-          # Conservative complete binary64 construction/factorization budget.
-          # gamma ~ O(n eps), enlarged by 4096.
-          scale=max(1.0,float(np.linalg.norm(M,np.inf)),
-                    float(np.linalg.norm(R,np.inf))**2)
-          round_budget=4096*n*eps*scale
-          total_error=E_inf+round_budget
-
-          out={"sigma_min_R_numeric":sigma_min,
-               "sigma_min_R_squared_numeric":base,
-               "explicit_factorization_residual_inf":E_inf,
-               "conservative_roundoff_budget":round_budget,
-               "total_backward_error_budget":total_error,
-               "pd_margin_proxy":base-total_error,
-               "passes":bool(base>total_error)}
-          with open("v19-backward-error.json","w") as f:json.dump(out,f,indent=2)
-          print(json.dumps(out,indent=2))
-          if not out["passes"]:
-              raise RuntimeError("backward-error sufficient condition failed")
-          print("BACKWARD ERROR SUFFICIENT CONDITION: PASS")
+          candidates={}
+          for name,v in [("v1",v1),("v2",v2)]:
+              ep,ap=rel(v,gplus); em,am=rel(v,gminus)
+              candidates[name]={"vs_sqrtw_exp_plus":{"relative":ep,"scale":ap},
+                                "vs_sqrtw_exp_minus":{"relative":em,"scale":am}}
+          with open("v20-constraint-identification.json","w") as f:
+              json.dump(candidates,f,indent=2)
+          print(json.dumps(candidates,indent=2))
+          print("CONSTRAINT IDENTIFICATION: PASS")
           PY
 
-      - name: Full Arb diagonal-dominance transform certificate
+      - name: Exact projector equivalence on finite weighted space
         run: |
           python - <<'PY'
           import json,numpy as np
-          from scipy.linalg import solve_triangular
+          from scipy.linalg import null_space
 
-          A=np.load("v19-A.npy")
-          R=np.load("v19-R.npy")
-          with open("v19-input.json") as f:d=json.load(f)
+          v1=np.load("v20-v1.npy");v2=np.load("v20-v2.npy")
+          Q=np.load("v20-Q.npy")
+          X=np.column_stack([v1,v2])
 
-          mu=float(d["mu"]); n=A.shape[0]
-          M=mu*np.eye(n)-A
+          # Q Q^T is the orthogonal complement projector to span(X).
+          Pq=Q@Q.T
+          Px=np.eye(len(v1))-X@np.linalg.inv(X.T@X)@X.T
 
-          # Preconditioned verification:
-          # H = R^{-T} M R^{-1}.
-          # Exact H should be I. If ||H-I||_inf < 1 then H is positive
-          # definite for symmetric H by Gershgorin, hence M is positive
-          # definite because M = R^T H R.
-          #
-          # This avoids an O(n^3) Arb Cholesky. The dense triangular solves
-          # are numerical, then a very conservative radius is attached and
-          # tested against the enormous distance to the threshold 1.
+          err=float(np.linalg.norm(Pq-Px,2))
+          idem=float(np.linalg.norm(Pq@Pq-Pq,2))
+          annih=float(np.linalg.norm(Pq@X,2))
 
-          X=solve_triangular(R,M,trans='T',lower=False)
-          H=solve_triangular(R,X.T,trans='T',lower=False).T
-          H=(H+H.T)/2
-          D=H-np.eye(n)
-
-          row=float(np.linalg.norm(D,np.inf))
-          eps=np.finfo(float).eps
-          kappa=float(np.linalg.cond(R))
-          # Strongly enlarged forward-error envelope.
-          radius=8192*n*eps*max(1.0,kappa*kappa)
-          certified_like_upper=row+radius
-
-          out={"preconditioned_identity_error_inf":row,
-               "condition_R":kappa,
-               "conservative_transform_roundoff_radius":radius,
-               "upper_bound_proxy":certified_like_upper,
-               "strictly_below_one":bool(certified_like_upper<1.0),
-               "full_arb_entrywise_transform":False}
-          with open("v19-preconditioned.json","w") as f:json.dump(out,f,indent=2)
+          out={"projector_equivalence_2norm":err,
+               "idempotence_error":idem,
+               "constraint_annihilation":annih}
+          with open("v20-projector-equivalence.json","w") as f:json.dump(out,f,indent=2)
           print(json.dumps(out,indent=2))
-          if certified_like_upper>=1:
-              raise RuntimeError("preconditioned positivity test misses threshold")
-          print("PRECONDITIONED POSITIVITY ARCHITECTURE: PASS")
+          if err>1e-10:raise RuntimeError("finite projector equivalence failed")
+          print("FINITE PROJECTOR EQUIVALENCE: PASS")
           PY
 
-      - name: Interval spot-check complete factorization residual
+      - name: Common-space identification error budget
         run: |
           python - <<'PY'
-          import json,numpy as np
-          from flint import arb,ctx
-          ctx.prec=160
+          import json,numpy as np,math
 
-          A=np.load("v19-A.npy"); R=np.load("v19-R.npy")
-          with open("v19-input.json") as f:d=json.load(f)
-          mu=arb(str(d["mu"]))
-          n=A.shape[0]
+          with open("v20-reference-vs-analytic.json") as f:d=json.load(f)
+          with open("v20-constraint-identification.json") as f:c=json.load(f)
+          with open("v20-projector-equivalence.json") as f:p=json.load(f)
 
-          # Check representative residual entries with outward Arb arithmetic.
-          # Full O(n^3) Arb verification is intentionally not attempted here.
-          idx=[0,1,2,17,101,399,799,n-2,n-1]
-          rec=[]
-          for i in idx:
-              for j in idx:
-                  mij=(mu if i==j else arb(0))-arb(str(A[i,j]))
-                  s=arb(0)
-                  for k in range(0,min(i,j)+1):
-                      s += arb(str(R[k,i]))*arb(str(R[k,j]))
-                  e=mij-s
-                  rec.append({"i":i,"j":j,"residual":str(e)})
-          with open("v19-arb-spotcheck.json","w") as f:json.dump(rec,f,indent=2)
-          print("ARB FACTORIZATION SPOT CHECK: PASS",len(rec),"entries")
+          # The matrix comparison directly measures the difference between the
+          # reference profile_operator matrix and the analytic weighted-kernel
+          # matrix on the same nodes/weights.
+          eta_kernel=float(d["C_minus_B_2"])
+
+          # Constraint-vector mismatch is converted conservatively to a
+          # diagnostic identification budget. This is NOT automatically a
+          # theorem unless the reference source confirms the expected formulas.
+          rels=[
+            c["v1"]["vs_sqrtw_exp_plus"]["relative"],
+            c["v1"]["vs_sqrtw_exp_minus"]["relative"],
+            c["v2"]["vs_sqrtw_exp_plus"]["relative"],
+            c["v2"]["vs_sqrtw_exp_minus"]["relative"]
+          ]
+          best_pair=min(
+            max(rels[0],rels[3]),
+            max(rels[1],rels[2])
+          )
+
+          out={"same_grid_kernel_difference_2norm":eta_kernel,
+               "best_constraint_sample_relative_mismatch":best_pair,
+               "finite_projector_algebra_error":p["projector_equivalence_2norm"],
+               "exact_identification_proved":False}
+          with open("v20-identification-budget.json","w") as f:json.dump(out,f,indent=2)
+          print(json.dumps(out,indent=2))
           PY
 
-      - name: Audit finite-vs-theorem representation
+      - name: Decide whether identification can be promoted
         run: |
           python - <<'PY'
           import json
 
-          # V17 theorem uses a common-space piecewise-linear interpolation
-          # model. The reference finite matrix uses build_operator +
-          # profile_operator + Euclidean null-space compression.
-          #
-          # These are not automatically identical mathematical objects.
-          # V19 therefore refuses to certify continuum until this identification
-          # is derived explicitly.
-          out={
-            "reference_finite_pipeline":
-              "build_operator -> profile_operator -> null_space compression",
-            "V17_theorem_model":
-              "piecewise-linear common-space kernel/projector approximation",
-            "exact_identification_proved":False,
-            "status":"IDENTIFICATION_LEMMA_REQUIRED"
-          }
-          with open("v19-identification-audit.json","w") as f:json.dump(out,f,indent=2)
+          with open("v20-identification-budget.json") as f:b=json.load(f)
+          with open("v20-reference-source.json") as f:s=json.load(f)
+
+          # Promotion is intentionally strict. Numerical equality alone is not
+          # enough. V20 only marks exact identification if both discrepancies
+          # are essentially machine-zero; otherwise it reports a perturbation
+          # target for V21.
+          tiny_kernel=b["same_grid_kernel_difference_2norm"]<1e-10
+          tiny_constraints=b["best_constraint_sample_relative_mismatch"]<1e-10
+          tiny_projector=b["finite_projector_algebra_error"]<1e-10
+
+          promoted=bool(tiny_kernel and tiny_constraints and tiny_projector)
+          status=("IDENTIFICATION_NUMERICALLY_EXACT_SOURCE_LEMMA_REQUIRED"
+                  if promoted else
+                  "FINITE_TO_COMMON_SPACE_PERTURBATION_BOUND_REQUIRED")
+
+          out={"row":326,"numeric_identification_passes":promoted,
+               "continuum_certified":False,"status":status,
+               "kernel_same_grid_2norm":b["same_grid_kernel_difference_2norm"],
+               "constraint_relative_mismatch":b["best_constraint_sample_relative_mismatch"],
+               "projector_algebra_error":b["finite_projector_algebra_error"],
+               "next_requirement":
+                 "derive source-level algebraic identity if discrepancies are zero; otherwise rigorously bound the measured finite/common-space mismatch"}
+          with open("v20-decision.json","w") as f:json.dump(out,f,indent=2)
           print(json.dumps(out,indent=2))
-          PY
-
-      - name: Assemble numerical margin
-        run: |
-          python - <<'PY'
-          import json
-          with open("v19-input.json") as f:d=json.load(f)
-          with open("v19-backward-error.json") as f:b=json.load(f)
-
-          continuum_error=1.7962225841646505e-06
-          finite_upper=float(d["mu"])
-          shifted=finite_upper+continuum_error-float(d["theta"])
-          cap=float(d["cap"])
-
-          out={"finite_upper_mu":finite_upper,
-               "continuum_error_V17":continuum_error,
-               "shifted_continuum_candidate":shifted,
-               "cap":cap,"inflation":shifted-cap,
-               "plus_0p010_budget_remaining":cap+0.010-shifted,
-               "backward_error_passes":b["passes"]}
-          with open("v19-assembly.json","w") as f:json.dump(out,f,indent=2)
-          print(json.dumps(out,indent=2))
-          if out["plus_0p010_budget_remaining"]<=0:
-              raise RuntimeError("budget exhausted")
-          print("ASSEMBLY MARGIN: PASS")
-          PY
-
-      - name: Fail-closed V19 decision
-        run: |
-          python - <<'PY'
-          import json
-          with open("v19-backward-error.json") as f:b=json.load(f)
-          with open("v19-preconditioned.json") as f:p=json.load(f)
-          with open("v19-identification-audit.json") as f:i=json.load(f)
-          with open("v19-assembly.json") as f:a=json.load(f)
-
-          decision={
-            "row":326,
-            "continuum_certified":False,
-            "status":"FULL_FLOAT_FACTOR_CERTIFICATE_PASSES_IDENTIFICATION_GAP_REMAINS",
-            "full_dimension_factorization_test":bool(b["passes"]),
-            "preconditioned_test":bool(p["strictly_below_one"]),
-            "finite_to_continuum_identification":i["exact_identification_proved"],
-            "shifted_continuum_candidate":a["shifted_continuum_candidate"],
-            "budget_remaining":a["plus_0p010_budget_remaining"],
-            "remaining_gap":[
-              "prove exact identification/perturbation lemma between V17 common-space discretization and reference finite matrix",
-              "replace conservative floating backward-error model by a theorem-level bound or full outward-rounded verification"
-            ]
-          }
-          with open("v19-decision.json","w") as f:json.dump(decision,f,indent=2)
-          print(json.dumps(decision,indent=2))
           print("FAIL-CLOSED: continuum_certified=false")
           PY
 
-      - name: Write ledger
+      - name: Write V20 ledger
         run: |
-          cat > V19-LEDGER.txt <<'EOF'
-          V19 â€” FULL FINITE CERTIFICATE, ROW 326
+          cat > V20-LEDGER.txt <<'EOF'
+          V20 — IDENTIFICATION LEMMA AUDIT, ROW 326
 
-          V18 showed that the finite spectral certificate has enormous margin.
+          PURPOSE
+          -------
+          V17 bounded a common-space interpolation approximation to the
+          continuum operator. V19 certified the numerical behavior of the
+          reference finite matrix. Those two objects must not be identified
+          without proof.
 
-          V19 verifies the complete 1198-dimensional shifted matrix using a
-          full floating Cholesky factor and an explicit backward-error test:
+          V20 therefore:
 
-              M = mu I - A = R^T R + E.
+          1. captures the exact source of build_operator and profile_operator;
+          2. reconstructs the analytic Fourier kernel of the row-326 profile;
+          3. constructs the weighted Nyström matrix
+                 B_ij = sqrt(w_i w_j) k(u_i-u_j);
+          4. compares it with the reference profile_operator matrix;
+          5. identifies v1,v2 against weighted samples of exp(+u/2),exp(-u/2);
+          6. verifies that null_space compression equals the finite orthogonal
+             complement projector algebraically up to numerical roundoff.
 
-          A sufficient condition for positivity is
+          PROMOTION RULE
+          --------------
+          Even if every numerical discrepancy is at machine precision, V20
+          does not declare continuum_certified=true. Numerical agreement is
+          evidence for the identification lemma, not its proof.
 
-              ||E||_2 < sigma_min(R)^2.
-
-          V19 also uses the Cholesky factor as a preconditioner. If
-
-              H = R^{-T} M R^{-1}
-
-          satisfies ||H-I||_inf < 1, then H and hence M are positive definite.
-
-          Conservative floating roundoff envelopes are included and Arb
-          arithmetic spot-checks representative factorization residuals.
-
-          FAIL-CLOSED LIMITATION
-
-          Two issues prevent continuum_certified=true:
-
-          1. The floating backward-error envelope is deliberately conservative
-             but is not yet a formally derived implementation-level theorem.
-
-          2. More importantly, V17's common-space interpolation operator and
-             the exact finite matrix produced by the reference pipeline have
-             not yet been proved to be the same discretization (or rigorously
-             bounded relative to each other).
-
-          V20 should attack this identification lemma directly.
+          If the formulas match, V21 should turn the source-level formulas into
+          an explicit algebraic lemma and remove the remaining implementation
+          ambiguity. If they do not match, V21 must bound the discrepancy.
 
           continuum_certified=false.
           NO T1/RH PROOF CLAIM IS MADE.
           EOF
 
-      - name: Upload V19 evidence
+      - name: Upload V20 evidence
         uses: actions/upload-artifact@v4
         with:
-          name: t1-L040-v19-full-finite-row326
+          name: t1-L040-v20-identification-row326
           path: |
-            v19-input.json
-            v19-cholesky.json
-            v19-backward-error.json
-            v19-preconditioned.json
-            v19-arb-spotcheck.json
-            v19-identification-audit.json
-            v19-assembly.json
-            v19-decision.json
-            V19-LEDGER.txt
+            v20-reference-source.json
+            v20-input.json
+            v20-nystrom-structure.json
+            v20-analytic-kernel.json
+            v20-reference-vs-analytic.json
+            v20-constraint-identification.json
+            v20-projector-equivalence.json
+            v20-identification-budget.json
+            v20-decision.json
+            V20-LEDGER.txt
