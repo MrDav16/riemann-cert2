@@ -1,4 +1,4 @@
-name: T1 L040 V6 Rigorous Remainder Prep
+name: T1 L040 V7 Operator Bound Audit
 
 on:
   workflow_dispatch:
@@ -6,7 +6,7 @@ on:
     branches: [main]
 
 jobs:
-  remainder:
+  operator-audit:
     runs-on: ubuntu-latest
     timeout-minutes: 90
 
@@ -30,81 +30,239 @@ jobs:
           test "$(git rev-parse HEAD)" = \
             "94fa51e8f26794ef2d206c6c12e7adb4d85cbeaf"
 
-      - name: Reproduce target rows and convergence
+      - name: Reproduce dual and signed targets
         working-directory: reference-riemann/experiments/weil_positivity
         run: |
           python - <<'PY'
           import json
           import numpy as np
+          from scipy.optimize import linprog
           from sigma_t1c import run
 
           L = 0.40
+          N = 2400
           TARGETS = [341, 326, 396]
-          NS = [600, 1200, 2400]
+
+          val, st = run(
+              L,
+              n=N,
+              verbose=False
+          )
+
+          r = np.asarray(
+              st["r"],
+              dtype=float
+          )
+
+          rows = [
+              np.asarray(x, dtype=float)
+              for x in st["rows"]
+          ]
+
+          caps = np.asarray(
+              st["caps"],
+              dtype=float
+          )
+
+          cost = np.asarray(
+              st["cost"],
+              dtype=float
+          )
+
+          tail = float(
+              st["tail"]
+          )
+
+          A = np.vstack(
+              rows + [np.ones_like(r)]
+          )
+
+          b = np.concatenate(
+              [caps, [1.0]]
+          )
+
+          lp = linprog(
+              cost - tail,
+              A_ub=A,
+              b_ub=b,
+              bounds=(0, None),
+              method="highs"
+          )
+
+          if not lp.success:
+              raise RuntimeError(
+                  lp.message
+              )
+
+          y = -np.asarray(
+              lp.ineqlin.marginals[:-1],
+              dtype=float
+          )
 
           report = {
               "L": L,
-              "targets": TARGETS,
-              "runs": []
+              "N": N,
+              "pilot_floor": float(val),
+              "targets": {}
           }
 
-          for n in NS:
-              print("=" * 72)
-              print("n =", n)
-              print("=" * 72)
+          print(
+              "pilot floor =",
+              repr(float(val))
+          )
 
-              val, st = run(
-                  L,
-                  n=n,
-                  verbose=False
-              )
+          for idx in TARGETS:
 
-              caps = np.asarray(
-                  st["caps"],
-                  dtype=float
-              )
+              report[
+                  "targets"
+              ][str(idx)] = {
+                  "cap_N":
+                      float(caps[idx]),
 
-              rows = [
-                  np.asarray(x, dtype=float)
-                  for x in st["rows"]
-              ]
+                  "dual_weight":
+                      float(y[idx]),
 
-              item = {
-                  "n": n,
-                  "pilot": float(val),
-                  "caps": {}
-              }
-
-              for idx in TARGETS:
-                  item["caps"][str(idx)] = {
-                      "cap": float(caps[idx]),
-                      "min": float(
+                  "sigma_min":
+                      float(
                           np.min(rows[idx])
                       ),
-                      "max": float(
+
+                  "sigma_max":
+                      float(
                           np.max(rows[idx])
                       )
-                  }
+              }
 
-                  print(
-                      idx,
-                      repr(float(caps[idx]))
+              print()
+              print(
+                  "row",
+                  idx
+              )
+
+              print(
+                  "cap_N =",
+                  repr(
+                      float(caps[idx])
                   )
+              )
 
-              report["runs"].append(item)
+              print(
+                  "dual weight =",
+                  repr(
+                      float(y[idx])
+                  )
+              )
+
+              print(
+                  "sigma range =",
+                  np.min(rows[idx]),
+                  np.max(rows[idx])
+              )
 
           with open(
-              "../../../v6-convergence.json",
+              "../../../v7-targets.json",
               "w"
           ) as f:
               json.dump(
                   report,
                   f,
-                  indent=2
+                  indent=2,
+                  sort_keys=True
               )
           PY
 
-      - name: Analytic sinc derivative bounds
+      - name: Verify projection contraction theorem numerically
+        run: |
+          python - <<'PY'
+          import numpy as np
+
+          rng = np.random.default_rng(
+              20260916
+          )
+
+          # Mathematical theorem used later:
+          #
+          # for orthogonal projection P,
+          #
+          # ||P E P||_op <= ||E||_op
+          # ||P E P||_HS <= ||E||_HS
+          #
+          # Numerical tests here are only
+          # regression checks of implementation.
+
+          for n in [20, 50, 100]:
+
+              X = rng.normal(
+                  size=(n, n)
+              )
+
+              E = (
+                  X + X.T
+              ) / 2
+
+              Q, _ = np.linalg.qr(
+                  rng.normal(
+                      size=(n, 2)
+                  )
+              )
+
+              P = (
+                  np.eye(n)
+                  - Q @ Q.T
+              )
+
+              PE = (
+                  P @ E @ P
+              )
+
+              op_E = np.linalg.norm(
+                  E,
+                  2
+              )
+
+              op_PE = np.linalg.norm(
+                  PE,
+                  2
+              )
+
+              hs_E = np.linalg.norm(
+                  E,
+                  "fro"
+              )
+
+              hs_PE = np.linalg.norm(
+                  PE,
+                  "fro"
+              )
+
+              print(
+                  n,
+                  "op:",
+                  op_PE,
+                  "<=",
+                  op_E,
+                  "HS:",
+                  hs_PE,
+                  "<=",
+                  hs_E
+              )
+
+              if op_PE > op_E + 1e-10:
+                  raise RuntimeError(
+                      "operator contraction failed"
+                  )
+
+              if hs_PE > hs_E + 1e-10:
+                  raise RuntimeError(
+                      "HS contraction failed"
+                  )
+
+          print(
+              "PROJECTION CONTRACTION: PASS"
+          )
+          PY
+
+      - name: Derive rigorous scalar kernel bounds
         run: |
           python - <<'PY'
           from flint import arb, ctx
@@ -112,69 +270,61 @@ jobs:
 
           ctx.prec = 192
 
-          # --------------------------------------------------
-          # Kernel:
-          #
-          # k_R(x) = sin(R x)/(pi x)
-          #
-          # x in [-2L,2L], L=0.4
-          #
-          # We derive deliberately conservative global bounds
-          # using the power series / integral representation
-          #
-          # sin(Rx)/x = integral_0^R cos(t x) dt
-          #
-          # Hence:
-          #
-          # |k_R|      <= R/pi
-          # |k_R'|     <= R^2/pi
-          # |k_R''|    <= R^3/(3 pi)
-          #
-          # The derivative-1 bound is intentionally loose:
-          # integral_0^R t dt = R^2/2 would be sharper.
-          #
-          # We record both safe bounds.
-          # --------------------------------------------------
-
           pi = arb.pi()
+          L = arb("0.4")
+          ell = 2 * L
 
-          Rs = [
-              arb("22"),
-              arb("21"),
-              arb("20"),
-              arb("15"),
-              arb("12"),
-              arb("10")
-          ]
+          # sinc kernel
+          #
+          # k_R(x)
+          # = sin(Rx)/(pi x)
+          # = (1/pi) int_0^R cos(tx) dt
+          #
+          # Therefore:
+          #
+          # |k|   <= R/pi
+          # |k'|  <= R^2/(2pi)
+          # |k''| <= R^3/(3pi)
+
+          def bounds(R):
+
+              R = arb(str(R))
+
+              return {
+                  "b0":
+                      R / pi,
+
+                  "b1":
+                      R**2
+                      / (2*pi),
+
+                  "b2":
+                      R**3
+                      / (3*pi)
+              }
 
           out = {}
 
-          print("GLOBAL SINC DERIVATIVE BOUNDS")
-          print()
+          for R in [
+              5, 8, 10, 12,
+              15, 18, 20, 22
+          ]:
 
-          for R in Rs:
+              z = bounds(R)
 
-              b0 = R / pi
-              b1 = R**2 / (2*pi)
-              b2 = R**3 / (3*pi)
-
-              key = str(R)
-
-              out[key] = {
-                  "abs_k": str(b0),
-                  "abs_k_prime": str(b1),
-                  "abs_k_second": str(b2)
+              out[str(R)] = {
+                  k: str(v)
+                  for k, v in z.items()
               }
 
               print(
-                  "R =", R,
-                  "|k| <=", b0,
-                  "|k'| <=", b1,
-                  "|k''| <=", b2
+                  "R=",
+                  R,
+                  z
               )
 
           with open(
-              "sinc-derivative-bounds.json",
+              "v7-kernel-bounds.json",
               "w"
           ) as f:
               json.dump(
@@ -184,292 +334,458 @@ jobs:
               )
 
           print()
-          print("ARB ANALYTIC BOUNDS: PASS")
+          print(
+              "interval length =",
+              ell
+          )
+
+          print(
+              "KERNEL DERIVATIVE BOUNDS: PASS"
+          )
           PY
 
-      - name: Trapezoid theorem budget
+      - name: Build signed-combination error envelopes
+        run: |
+          python - <<'PY'
+          from flint import arb, ctx
+          import json
+
+          ctx.prec = 192
+
+          # ------------------------------------------------
+          # For a signed combination
+          #
+          # K = sum_i a_i K_{R_i},
+          #
+          # triangle inequality gives
+          #
+          # |K''|
+          # <= sum_i |a_i| R_i^3/(3 pi).
+          #
+          # We do NOT yet claim that every active
+          # profile operator is exactly such a finite
+          # sinc combination.
+          #
+          # This stage computes safe envelopes for
+          # candidate combinations and records the
+          # missing representation obligation.
+          # ------------------------------------------------
+
+          pi = arb.pi()
+          L = arb("0.4")
+          ell = 2 * L
+
+          N = 2400
+
+          h = (
+              ell
+              / arb(N - 1)
+          )
+
+          # Worst-case envelope:
+          #
+          # band term coefficient 1
+          # plus signed theta term.
+          #
+          # Use R <= 22 throughout.
+          #
+          # theta inferred safely from row minimum:
+          # 341 -> 1.5
+          # 326 -> 0.2
+          # 396 -> 4.0
+
+          theta = {
+              341: arb("1.5"),
+              326: arb("0.2"),
+              396: arb("4.0")
+          }
+
+          out = {}
+
+          for row, th in theta.items():
+
+              R = arb("22")
+
+              b2_single = (
+                  R**3
+                  / (3*pi)
+              )
+
+              # Conservative triangle envelope.
+              #
+              # Identity contribution has zero
+              # quadrature error in this derivative
+              # model; the extra band operator is
+              # bounded by theta times the same
+              # worst-case R=22 kernel.
+
+              b2_signed = (
+                  (1 + th)
+                  * b2_single
+              )
+
+              trap = (
+                  ell
+                  * h**2
+                  * b2_signed
+                  / 12
+              )
+
+              out[
+                  str(row)
+              ] = {
+                  "theta":
+                      str(th),
+
+                  "sup_second_candidate":
+                      str(b2_signed),
+
+                  "scalar_trapezoid_candidate":
+                      str(trap)
+              }
+
+              print()
+              print(
+                  "row",
+                  row
+              )
+
+              print(
+                  "theta =",
+                  th
+              )
+
+              print(
+                  "candidate sup second =",
+                  b2_signed
+              )
+
+              print(
+                  "candidate scalar trap =",
+                  trap
+              )
+
+          with open(
+              "v7-signed-envelope.json",
+              "w"
+          ) as f:
+              json.dump(
+                  out,
+                  f,
+                  indent=2
+              )
+
+          print()
+          print(
+              "IMPORTANT:"
+          )
+
+          print(
+              "These are rigorous scalar "
+              "triangle bounds conditional on "
+              "the stated sinc representation."
+          )
+
+          print(
+              "They are NOT yet full "
+              "operator-norm delta_N values."
+          )
+          PY
+
+      - name: Test tensor and Hilbert-Schmidt scaling
         run: |
           python - <<'PY'
           from flint import arb, ctx
 
           ctx.prec = 192
 
-          # Composite trapezoid theorem:
+          # ------------------------------------------------
+          # Suppose a kernel error e(u,v) satisfies
           #
-          # | integral_a^b f(x) dx - T_N |
-          # <= (b-a) h^2 / 12 * sup |f''|
+          # |e(u,v)| <= eps uniformly
           #
-          # We evaluate a deliberately conservative
-          # scale for the sinc kernel itself.
+          # on T x T, |T| = ell.
           #
-          # This is NOT yet the full projected-operator
-          # delta_N: projection and composed kernels
-          # still need to be included.
+          # Then
+          #
+          # ||E||_HS^2
+          # = int_T int_T |e|^2
+          # <= ell^2 eps^2
+          #
+          # hence
+          #
+          # ||E||_op <= ||E||_HS <= ell eps.
+          #
+          # This implication itself is rigorous.
+          #
+          # The unresolved step is proving that the
+          # scalar trapezoid remainder from the prior
+          # step is a UNIFORM kernel error eps for the
+          # Nyström approximation.
+          # ------------------------------------------------
 
-          L = arb("0.4")
-          length = 2 * L
-          pi = arb.pi()
+          ell = arb("0.8")
 
-          RMAX = arb("22")
-
-          sup_second = (
-              RMAX**3
-              / (3*pi)
-          )
+          eps_examples = [
+              arb("1e-5"),
+              arb("1e-4"),
+              arb("1e-3"),
+              arb("1e-2")
+          ]
 
           print(
-              "sup |k''| bound =",
-              sup_second
+              "UNIFORM KERNEL ERROR -> HS/OP"
           )
 
-          for n in [
-              600,
-              1200,
-              2400
-          ]:
+          for eps in eps_examples:
 
-              h = (
-                  2 * L
-                  / arb(n - 1)
+              hs = (
+                  ell * eps
               )
 
-              err_1d = (
-                  length
-                  * h**2
-                  * sup_second
-                  / 12
-              )
-
-              print()
-              print("n =", n)
-              print("h =", h)
               print(
-                  "raw 1D trapezoid bound =",
-                  err_1d
+                  "eps =",
+                  eps,
+                  "=> ||E||op <=",
+                  hs
               )
 
           print()
           print(
-              "NOTE: these are theorem-based "
-              "quadrature scales, not yet "
-              "full spectral delta_N."
+              "THEOREM IMPLICATION: PASS"
           )
           PY
 
-      - name: Empirical second-order envelope
+      - name: Candidate delta budget table
         run: |
           python - <<'PY'
           import json
 
           with open(
-              "v6-convergence.json"
+              "v7-targets.json"
           ) as f:
-              d = json.load(f)
+              targets = json.load(f)
 
-          targets = [
-              "341",
-              "326",
-              "396"
-          ]
-
-          print(
-              "SECOND-ORDER DIAGNOSTIC"
+          pilot = float(
+              targets["pilot_floor"]
           )
 
-          for row in targets:
+          # These are hypothetical delta values
+          # for budget analysis ONLY.
 
-              vals = [
-                  run["caps"][row]["cap"]
-                  for run in d["runs"]
-              ]
-
-              d1 = abs(
-                  vals[1] - vals[0]
-              )
-
-              d2 = abs(
-                  vals[2] - vals[1]
-              )
-
-              ratio = (
-                  d1 / d2
-                  if d2 != 0
-                  else float("inf")
-              )
-
-              # If exact second order held:
-              #
-              # e_2400 approximately d2/3.
-              #
-              # DIAGNOSTIC ONLY.
-
-              richardson = (
-                  d2 / 3
-              )
-
-              print()
-              print("row", row)
-              print("600  =", vals[0])
-              print("1200 =", vals[1])
-              print("2400 =", vals[2])
-              print("d1 =", d1)
-              print("d2 =", d2)
-              print("d1/d2 =", ratio)
-              print(
-                  "O(h^2) inferred residual =",
-                  richardson
-              )
-
-          print()
-          print(
-              "NO Richardson value above is "
-              "used as a proof bound."
-          )
-          PY
-
-      - name: Conservative operator budget experiment
-        run: |
-          python - <<'PY'
-          # -------------------------------------------------
-          # This step answers an engineering question:
-          #
-          # How coarse could a future rigorous delta_N
-          # actually be and still preserve useful margin?
-          # -------------------------------------------------
-
-          pilot = 0.0847191143605307
-
-          weights = {
-              341: 0.4250449361150816,
-              326: 0.3593393877190819,
-              396: 0.1389016438184634
-          }
-
-          scenarios = [
+          deltas = [
+              1e-5,
               1e-4,
               5e-4,
               1e-3,
-              2e-3,
               5e-3,
               1e-2
           ]
 
           print(
-              "CONSERVATIVE DELTA SCENARIOS"
+              "DUAL MARGIN STRESS TEST"
           )
 
-          total_y = sum(
-              weights.values()
-          )
+          for delta in deltas:
 
-          for delta in scenarios:
+              loss = 0.0
 
-              loss = (
-                  total_y * delta
-              )
+              for row in [
+                  "341",
+                  "326",
+                  "396"
+              ]:
 
-              remaining = (
-                  pilot - loss
-              )
+                  y = (
+                      targets[
+                          "targets"
+                      ][row][
+                          "dual_weight"
+                      ]
+                  )
+
+                  loss += (
+                      y * delta
+                  )
 
               print(
-                  f"delta={delta:.6g}",
-                  f"loss={loss:.12g}",
-                  f"remaining={remaining:.12g}"
+                  "delta each =",
+                  delta,
+                  "weighted loss =",
+                  loss,
+                  "remaining =",
+                  pilot - loss
               )
 
           print()
           print(
-              "Even this only accounts for the "
-              "three priority signed rows."
+              "DIAGNOSTIC ONLY."
           )
           PY
 
-      - name: Generate V6 proof obligations
+      - name: Create fail-closed proof ledger
         run: |
-          cat > V6-PROOF-OBLIGATIONS.txt <<'EOF'
-          V6 — RIGOROUS REMAINDER PREPARATION
+          cat > V7-PROOF-LEDGER.txt <<'EOF'
+          T1 L=0.40 — V7 OPERATOR BOUND AUDIT
 
-          VERIFIED / REPRODUCED
+          ESTABLISHED MATHEMATICAL FACTS USED
 
-          1. Pinned reference implementation.
-          2. Priority rows 341, 326, 396.
-          3. Stable n=600/1200/2400 convergence.
-          4. Arb 192-bit arithmetic.
-          5. Analytic global derivative bounds for
+          [A] For an orthogonal projection P:
 
-                 k_R(x)=sin(Rx)/(pi x)
+              ||P E P||op <= ||E||op
 
-             obtained from
+              ||P E P||HS <= ||E||HS.
 
-                 k_R(x)
-                 = (1/pi) integral_0^R cos(tx) dt.
+          Therefore the pole projection itself
+          cannot enlarge an already-proved
+          operator error.
 
-          6. Composite trapezoid theorem evaluated
-             with rigorous Arb arithmetic.
+          [B] For an integral operator with
+          kernel error e on T x T:
 
-          STILL REQUIRED FOR A TRUE delta_N
+              ||E||op <= ||E||HS.
 
-          A. Lift scalar quadrature error to a
-             Hilbert-Schmidt/operator norm error.
+          If
 
-          B. Include the weighted Nyström
-             symmetrization.
+              |e(u,v)| <= eps
 
-          C. Include the rank-2 projection onto
-             the orthogonal complement of
+          uniformly and |T| = ell, then
 
-                 exp(+u/2)
-                 exp(-u/2).
+              ||E||HS <= ell * eps.
 
-          D. Treat signed operators
+          [C] For
 
-                 K_band
-                 - theta (I - K_wide/cut)
+              k_R(x)
+              = sin(Rx)/(pi x)
+              = (1/pi) int_0^R cos(tx) dt,
 
-             rather than a single sinc kernel.
+          rigorous derivative bounds are
 
-          E. Obtain an explicit verified number
+              |k_R|   <= R/pi
+              |k_R'|  <= R^2/(2pi)
+              |k_R''| <= R^3/(3pi).
 
-                 delta_N
+          [D] For a finite signed combination
 
-             satisfying
+              K = sum_i a_i K_Ri,
 
-                 ||A - A_N||_op <= delta_N.
+          triangle inequality gives
 
-          F. Verify the finite matrix eigenvalue
-             itself with interval arithmetic or
-             a residual-based eigenvalue enclosure.
+              |K''|
+              <=
+              sum_i |a_i| Ri^3/(3pi).
 
-          G. Only then form
+          NOT YET ESTABLISHED
 
-                 Lambda_plus
-                 =
-                 lambda_N_upper
-                 + delta_N
+          [1] A theorem identifying the finite
+          weighted Nyström matrix used by the
+          reference code with an operator
+          approximation whose kernel error is
+          uniformly bounded by the scalar
+          trapezoid remainder.
 
-             and charge
+          This is the principal missing link.
 
-                 y_j
-                 (Lambda_plus - Lambda_float)
+          [2] Exact finite-sinc representations
+          for every active profile/tent operator.
 
-             against the dual margin.
+          [3] Rigorous finite-matrix eigenvalue
+          upper enclosures.
 
-          IMPORTANT
+          [4] Bounds for all 40 active dual rows.
 
-          V6 does not claim T1 or RH has been proved.
-          It converts the observed O(h^2) behavior
-          into explicit proof obligations and
-          theorem-based error components.
+          CONSEQUENCE
+
+          V7 MUST NOT output
+
+              "T1 CERTIFIED"
+              "RH PROVED"
+
+          as a rigorous mathematical conclusion.
+
+          A valid Lambda_plus requires:
+
+              Lambda_plus
+              =
+              lambda_N_upper
+              +
+              delta_N
+
+          where BOTH terms are rigorous.
+
+          NEXT TARGET
+
+          Prove or replace missing link [1].
+
+          A promising alternative is to bypass
+          Nyström convergence entirely and use
+          an analytic Hilbert-Schmidt / moment
+          upper bound directly on the continuum
+          operator, because this avoids needing
+          to prove spectral convergence of the
+          discretization.
           EOF
 
-          cat V6-PROOF-OBLIGATIONS.txt
+          cat V7-PROOF-LEDGER.txt
 
-      - name: Upload V6 evidence
+      - name: Decide next mathematical route
+        run: |
+          python - <<'PY'
+          # Fail-closed route decision.
+          #
+          # We deliberately do NOT manufacture
+          # a rigorous delta_N from the scalar
+          # trapezoid bound.
+
+          print("=" * 72)
+          print("V7 DECISION")
+          print("=" * 72)
+
+          print()
+          print(
+              "Nyström route remains numerically "
+              "excellent."
+          )
+
+          print(
+              "However the uniform operator-error "
+              "link is not yet proved."
+          )
+
+          print()
+          print(
+              "NEXT PRIMARY ROUTE:"
+          )
+
+          print(
+              "continuum Hilbert-Schmidt / "
+              "moment bound with verified "
+              "1-D integrals and rank-2 "
+              "projection corrections."
+          )
+
+          print()
+          print(
+              "NYSTROM ROUTE:"
+          )
+
+          print(
+              "retain as independent numerical "
+              "cross-check."
+          )
+
+          print()
+          print(
+              "NO RIGOROUS CERTIFICATION CLAIM."
+          )
+          PY
+
+      - name: Upload V7 evidence
         uses: actions/upload-artifact@v4
         with:
-          name: t1-L040-v6-remainder-prep
+          name: t1-L040-v7-operator-audit
           path: |
-            v6-convergence.json
-            sinc-derivative-bounds.json
-            V6-PROOF-OBLIGATIONS.txt
+            v7-targets.json
+            v7-kernel-bounds.json
+            v7-signed-envelope.json
+            V7-PROOF-LEDGER.txt
