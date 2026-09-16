@@ -1,4 +1,4 @@
-name: T1 L040 V10.1 Direct Shifted Active Rows
+name: T1 L040 V10.2 Direct Shifted Active Rows
 
 on:
   workflow_dispatch:
@@ -18,7 +18,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install numpy scipy
+          pip install numpy scipy mpmath
 
       - name: Fetch pinned reference
         run: |
@@ -190,7 +190,7 @@ jobs:
           with open("v101-dual-impact.json") as f: d=json.load(f)
 
           print("="*72)
-          print("V10.1 RESULT")
+          print("V10.2 RESULT")
           print("="*72)
           print("Priority finite-dimensional verdict:",d["verdict"])
           print("Remaining pilot margin:",d["remaining_margin"])
@@ -203,10 +203,10 @@ jobs:
       - name: Write ledger
         run: |
           cat > V101-LEDGER.txt <<'EOF'
-          V10.1 — DIRECT SHIFTED ACTIVE-ROW TEST
+          V10.2 — DIRECT SHIFTED ACTIVE-ROW TEST
 
           V10 showed that profile_operator(sigma) is not the original signed
-          operator construction. Therefore V10.1 does not use it.
+          operator construction. Therefore V10.2 does not use it.
 
           Instead, for each exact stored active profile sigma and
           theta = -min(sigma), it forms
@@ -229,7 +229,7 @@ jobs:
           inflation against the exact LP dual weights.
 
           This is still NOT a rigorous continuum certificate and NOT a proof
-          of T1 or RH. A successful V10.1 only justifies proceeding to
+          of T1 or RH. A successful V10.2 only justifies proceeding to
           rigorous continuum moment evaluation and rank-2 corrections.
           EOF
           cat V101-LEDGER.txt
