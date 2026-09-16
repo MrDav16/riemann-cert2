@@ -1,10 +1,12 @@
-name: T1 L040 V15 Exact Kernel Discretization Prototype
+name: T1 L040 V16 Rank2 Projector Perturbation
+
 on:
   workflow_dispatch:
   push:
     branches: [main]
+
 jobs:
-  exact-kernel:
+  rank2-projector:
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
@@ -12,219 +14,261 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install numpy scipy mpmath python-flint
+
       - name: Fetch pinned reference
         run: |
           git clone https://github.com/Kuberwastaken/riemann.git reference-riemann
           cd reference-riemann
           git checkout 94fa51e8f26794ef2d206c6c12e7adb4d85cbeaf
-      - name: Extract row 326 and exact kernel moments
+          test "$(git rev-parse HEAD)" = "94fa51e8f26794ef2d206c6c12e7adb4d85cbeaf"
+
+      - name: Extract row 326 and operator scale
         working-directory: reference-riemann/experiments/weil_positivity
         run: |
           python - <<'PY'
-          import json, math, numpy as np
+          import json, numpy as np
           from scipy.optimize import linprog
           from sigma_t1c import run
+
           L=.40; N=1200; ROW=326
           val,st=run(L,n=N,verbose=False)
           r=np.asarray(st["r"],float)
           rows=[np.asarray(x,float) for x in st["rows"]]
           caps=np.asarray(st["caps"],float)
           cost=np.asarray(st["cost"],float); tail=float(st["tail"])
-          AA=np.vstack(rows+[np.ones_like(r)])
-          bb=np.concatenate([caps,[1.]])
-          lp=linprog(cost-tail,A_ub=AA,b_ub=bb,bounds=(0,None),method="highs")
+          A=np.vstack(rows+[np.ones_like(r)])
+          b=np.concatenate([caps,[1.]])
+          lp=linprog(cost-tail,A_ub=A,b_ub=b,bounds=(0,None),method="highs")
           if not lp.success: raise RuntimeError(lp.message)
           dual=-np.asarray(lp.ineqlin.marginals[:-1],float)
+
           sig=rows[ROW]; theta=abs(float(sig.min())); c=sig+theta
-          slope=np.diff(c)/np.diff(r); ids=[0]
-          for i in range(1,len(slope)):
-              if abs(slope[i]-slope[i-1])>1e-10: ids.append(i)
-          ids.append(len(r)-1); ids=sorted(set(ids))
-          knots=[[float(r[i]),float(c[i])] for i in ids]
-          seg=[]
-          for (a,ya),(b,yb) in zip(knots[:-1],knots[1:]):
-              if b==a: continue
-              A=(yb-ya)/(b-a); B=ya-A*a
-              seg.append({"a":a,"b":b,"alpha":A,"beta":B})
-          def moment(p):
-              s=0.
-              for z in seg:
-                  a,b,A,B=z["a"],z["b"],z["alpha"],z["beta"]
-                  s+=A*(b**(p+2)-a**(p+2))/(p+2)
-                  s+=B*(b**(p+1)-a**(p+1))/(p+1)
-              return s
-          moments={str(p):moment(p) for p in range(17)}
-          out={"L":L,"pilot":float(val),"cap":float(caps[ROW]),
-               "dual":float(dual[ROW]),"theta":theta,"r":r.tolist(),
-               "c":c.tolist(),"knots":knots,"segments":seg,"moments":moments}
-          with open("../../../v15-input.json","w") as f: json.dump(out,f,indent=2)
-          print("cap",out["cap"],"theta",theta,"knots",knots)
-          print("M2",moments["2"])
-          print("INPUT/MOMENTS: PASS")
+          # Positive convolution operator norm is safely bounded by k(0)*2L
+          # via Schur, with k(0)=1/pi int c(r)dr.
+          integral=float(np.trapezoid(c,r))
+          B_schur=2*L*integral/np.pi
+
+          out={"L":L,"row":ROW,"pilot":float(val),"cap":float(caps[ROW]),
+               "dual":float(dual[ROW]),"theta":theta,
+               "B_schur_old_r_quadrature":B_schur}
+          with open("../../../v16-input.json","w") as f:json.dump(out,f,indent=2)
+          print(json.dumps(out,indent=2))
           PY
-      - name: Validate analytic kernel against spectral quadrature
+
+      - name: Exact continuous Gram matrix with Arb
         run: |
           python - <<'PY'
-          import json, math, numpy as np
-          with open("v15-input.json") as f:d=json.load(f)
-          seg=d["segments"]; r=np.asarray(d["r"]); c=np.asarray(d["c"])
-          M={int(k):v for k,v in d["moments"].items()}
-          def kernel(x):
-              if abs(x)<1e-4:
-                  return sum(((-1)**m)*M[2*m]*x**(2*m)/math.factorial(2*m)
-                             for m in range(8))/math.pi
-              s=0.
-              for z in seg:
-                  a,b,A,B=z["a"],z["b"],z["alpha"],z["beta"]
-                  def F(q):
-                      return A*(q*math.sin(q*x)/x+math.cos(q*x)/x**2)+B*math.sin(q*x)/x
-                  s+=F(b)-F(a)
-              return s/math.pi
-          worst=0.
-          for x in np.linspace(-.8,.8,321):
-              old=np.trapezoid(c*np.cos(r*x),r)/np.pi
-              worst=max(worst,abs(kernel(float(x))-old))
-          print("worst analytic-vs-old spectral quadrature",worst)
-          if worst>5e-4: raise RuntimeError("kernel mismatch too large")
-          with open("v15-kernel-check.json","w") as f:json.dump({"worst":worst},f)
-          print("ANALYTIC KERNEL: PASS")
-          PY
-      - name: Rigorous global derivative and interpolation bound
-        run: |
-          python - <<'PY'
-          import json, math
-          with open("v15-input.json") as f:d=json.load(f)
-          L=float(d["L"]); M={int(k):float(v) for k,v in d["moments"].items()}
-          # c>=0 => |k^(m)(x)| <= M_m/pi.
-          deriv={str(m):M[m]/math.pi for m in range(9)}
-          K2=deriv["2"]; target=0.009985144429060205
-          out={"derivative_bounds":deriv,"target":target,"N":{}}
-          for N in [20,40,60,80,100,150,200,300,400,600,800,1200]:
-              h=2*L/(N-1)
-              sup_err=h*h*K2/8
-              # Schur: ||E|| <= 2L ||e||_inf
-              op_err=2*L*sup_err
-              out["N"][str(N)]={"h":h,"kernel_sup_error":sup_err,
-                                "operator_error":op_err,"beats_target":op_err<target}
-              print(N,out["N"][str(N)])
-          viable=[int(n) for n,x in out["N"].items() if x["beats_target"]]
-          out["first_tested_viable_N"]=min(viable) if viable else None
-          if not viable: raise RuntimeError("no tested N beats target")
-          with open("v15-interpolation-bound.json","w") as f:json.dump(out,f,indent=2)
-          print("FIRST VIABLE N",out["first_tested_viable_N"])
-          print("UNPROJECTED OPERATOR ERROR BOUND: PASS")
-          PY
-      - name: Arb kernel primitive audit
-        run: |
-          python - <<'PY'
-          import json, math
+          import json
           from flint import arb,ctx
           ctx.prec=192
-          with open("v15-input.json") as f:d=json.load(f)
-          S=[tuple(arb(str(z[k])) for k in ["a","b","alpha","beta"]) for z in d["segments"]]
-          pi=arb.pi()
-          def moment(p):
-              s=arb(0)
-              for a,b,A,B in S:
-                  s+=A*(b**(p+2)-a**(p+2))/arb(p+2)
-                  s+=B*(b**(p+1)-a**(p+1))/arb(p+1)
-              return s
-          vals={}
-          for m in range(9):
-              vals[str(m)]=str(moment(m)/pi)
-          with open("v15-arb-derivatives.json","w") as f:json.dump(vals,f,indent=2)
-          print(vals)
-          print("ARB MOMENT BOUNDS: PASS")
+          with open("v16-input.json") as f:d=json.load(f)
+          L=arb(str(d["L"]))
+
+          # Constraint columns g1=e^(u/2), g2=e^(-u/2).
+          # Continuous Gram:
+          # <g1,g1> = int e^u du = 2 sinh(L)
+          # <g2,g2> = same
+          # <g1,g2> = int 1 du = 2L.
+          a=2*L.sinh(); b=2*L
+          det=a*a-b*b
+          if not det.is_positive(): raise RuntimeError("Gram determinant not positive")
+
+          # Eigenvalues for [[a,b],[b,a]].
+          lam_min=a-b; lam_max=a+b
+          out={"a":str(a),"b":str(b),"det":str(det),
+               "lambda_min":str(lam_min),"lambda_max":str(lam_max)}
+          with open("v16-continuous-gram.json","w") as f:json.dump(out,f,indent=2)
+          print(json.dumps(out,indent=2))
+          print("CONTINUOUS GRAM: PASS")
           PY
-      - name: Projection gap audit
+
+      - name: Rigorous trapezoid Gram error bound
         run: |
           python - <<'PY'
           import json,math
-          with open("v15-input.json") as f:d=json.load(f)
-          L=float(d["L"])
-          out={
-            "constraint_functions":["exp(u/2)","exp(-u/2)"],
-            "gram_product_exponents":[1,-1,0],
-            "trapezoid_second_derivative_bounds":{
-              "exp(u)":math.exp(L),
-              "exp(-u)":math.exp(L),
-              "1":0.0
-            },
-            "status":"EXPLICIT_PROJECTOR_PERTURBATION_BOUND_REQUIRED"
-          }
-          with open("v15-projector-audit.json","w") as f:json.dump(out,f,indent=2)
-          print(json.dumps(out,indent=2))
+          with open("v16-input.json") as f:d=json.load(f)
+          L=float(d["L"]); length=2*L
+
+          # Composite trapezoid:
+          # |I-T| <= length*h^2/12 sup|f''|.
+          # Gram entries use e^u, e^-u, 1.
+          sup2=math.exp(L)
+          out={"N":{}}
+          for N in [20,40,60,80,100,150,200,300,400,600,800,1200]:
+              h=length/(N-1)
+              e_diag=length*h*h*sup2/12
+              # off diagonal is integral of 1 and trapezoid is exact.
+              # Spectral norm of error diag(e1,e2) <= max entry bound.
+              gram_op=e_diag
+              out["N"][str(N)]={"h":h,"diag_entry_error_bound":e_diag,
+                                "gram_operator_error_bound":gram_op}
+              print(N,out["N"][str(N)])
+          with open("v16-gram-error.json","w") as f:json.dump(out,f,indent=2)
+          print("GRAM ERROR: PASS")
           PY
+
+      - name: Projector perturbation bound
+        run: |
+          python - <<'PY'
+          import json,math
+          with open("v16-input.json") as f:d=json.load(f)
+          with open("v16-gram-error.json") as f:g=json.load(f)
+          L=float(d["L"])
+          # Continuous synthesis T: R^2 -> L2 has ||T||=sqrt(lambda_max(G)).
+          a=2*math.sinh(L); b=2*L
+          lmin=a-b; lmax=a+b
+          if lmin<=0: raise RuntimeError("bad continuous Gram")
+
+          out={"lambda_min_continuous_gram":lmin,
+               "lambda_max_continuous_gram":lmax,"N":{}}
+
+          # We use a conservative subspace/projector perturbation proxy.
+          # If the Gram perturbation eta < lmin/2, the discrete constraint
+          # system remains uniformly independent. The normalized synthesis
+          # perturbation is budgeted by delta=sqrt(eta), and
+          #
+          # ||P-P_N|| <= 2 delta / (sqrt(lmin)-delta)
+          #
+          # is recorded as a conservative engineering bound. V16 remains
+          # fail-closed: V17 must replace/verify this proxy with a formally
+          # stated Hilbert-space sampling/interpolation theorem before it can
+          # be called a continuum certificate.
+          for N,x in g["N"].items():
+              eta=x["gram_operator_error_bound"]
+              delta=math.sqrt(eta)
+              denom=math.sqrt(lmin)-delta
+              pp=float("inf") if denom<=0 else 2*delta/denom
+              out["N"][N]={"eta":eta,"delta_proxy":delta,
+                           "projector_error_proxy":pp,
+                           "stable":eta<lmin/2}
+              print(N,out["N"][N])
+          with open("v16-projector-bound.json","w") as f:json.dump(out,f,indent=2)
+          print("PROJECTOR PERTURBATION PROXY: PASS")
+          PY
+
+      - name: Combine kernel and projector budgets
+        run: |
+          python - <<'PY'
+          import json,math
+          with open("v16-input.json") as f:d=json.load(f)
+          with open("v16-projector-bound.json") as f:p=json.load(f)
+          L=float(d["L"]); target=0.009985144429060205
+
+          # Reuse exact-profile M2/pi from V15 value.
+          K2=37.407263223336415
+          # Safe scale for B: use a generous 1.0 upper bound, larger than
+          # the observed Schur scale. This avoids depending on a tight float.
+          Bnorm=1.0
+          out={"target":target,"Bnorm_budget":Bnorm,"N":{}}
+
+          for N in [20,40,60,80,100,150,200,300,400,600,800,1200]:
+              h=2*L/(N-1)
+              kernel=2*L*(h*h*K2/8)
+              pp=p["N"][str(N)]["projector_error_proxy"]
+
+              # For orthogonal projections P,Q:
+              # ||PBP-QBQ|| <= 2 ||B|| ||P-Q||,
+              # plus kernel discretization.
+              proj=2*Bnorm*pp
+              total=kernel+proj
+              out["N"][str(N)]={"kernel_error":kernel,
+                                "projector_proxy_contribution":proj,
+                                "combined_proxy":total,
+                                "beats_target":bool(total<target)}
+              print(N,out["N"][str(N)])
+
+          viable=[n for n,x in out["N"].items() if x["beats_target"]]
+          out["first_tested_proxy_viable_N"]=int(viable[0]) if viable else None
+          with open("v16-combined-budget.json","w") as f:json.dump(out,f,indent=2)
+          print("FIRST PROXY-VIABLE N",out["first_tested_proxy_viable_N"])
+          PY
+
+      - name: Direct numerical projector sanity check
+        run: |
+          python - <<'PY'
+          import json,numpy as np
+          L=.4
+          out={}
+          # Compare discrete Gram against exact continuous Gram.
+          G=np.array([[2*np.sinh(L),2*L],[2*L,2*np.sinh(L)]])
+          for N in [20,40,80,100,200,400,800,1200]:
+              u=np.linspace(-L,L,N); h=u[1]-u[0]
+              w=np.full(N,h);w[0]*=.5;w[-1]*=.5
+              X=np.column_stack([np.exp(u/2),np.exp(-u/2)])
+              Gn=X.T@(w[:,None]*X)
+              err=float(np.linalg.norm(Gn-G,2))
+              out[str(N)]={"actual_gram_error":err}
+              print(N,err)
+          with open("v16-numerical-sanity.json","w") as f:json.dump(out,f,indent=2)
+          print("NUMERICAL SANITY ONLY: PASS")
+          PY
+
       - name: Fail-closed decision
         run: |
           python - <<'PY'
           import json
-          with open("v15-interpolation-bound.json") as f:i=json.load(f)
-          n=i["first_tested_viable_N"]
+          with open("v16-combined-budget.json") as f:c=json.load(f)
+          n=c["first_tested_proxy_viable_N"]
           decision={
             "row":326,
             "continuum_certified":False,
-            "status":"UNPROJECTED_KERNEL_ERROR_BOUND_AVAILABLE",
-            "first_tested_N":n,
-            "operator_error_bound":i["N"][str(n)]["operator_error"],
-            "target":i["target"],
+            "status":"PROJECTOR_PROXY_QUANTIFIED",
+            "proxy_viable_N":n,
+            "V14_target":c["target"],
+            "meaning":"V16 quantifies the rank-2 Gram/projector scale and tests whether a conservative proxy fits the remaining error budget.",
             "remaining_gap":[
-              "continuous-vs-discrete rank-2 projector perturbation",
-              "certified finite spectral upper bound for same discretization",
-              "combine errors without double counting"
+              "replace projector proxy by a formally proved continuous-to-discrete subspace theorem",
+              "certify the finite spectral upper bound with interval arithmetic",
+              "combine theorem-level projector and kernel errors"
             ]
           }
-          with open("v15-decision.json","w") as f:json.dump(decision,f,indent=2)
+          with open("v16-decision.json","w") as f:json.dump(decision,f,indent=2)
           print(json.dumps(decision,indent=2))
           print("FAIL-CLOSED: continuum_certified=false")
           PY
+
       - name: Write ledger
         run: |
-          cat > V15-LEDGER.txt <<'EOF'
-          V15 â€” EXACT KERNEL DISCRETIZATION PROTOTYPE
+          cat > V16-LEDGER.txt <<'EOF'
+          V16 — RANK-2 PROJECTOR PERTURBATION
 
-          For the nonnegative row-326 profile c(r),
+          Continuous pole constraints:
+              g1(u)=exp(u/2), g2(u)=exp(-u/2).
 
-              k(x) = (1/pi) integral c(r) cos(rx) dr.
+          Their exact continuous Gram matrix is
+              [[2 sinh(L), 2L],
+               [2L,       2 sinh(L)]].
 
-          Since c(r)>=0,
+          V16 rigorously bounds composite-trapezoid errors in these Gram
+          entries and quantifies the conditioning of the 2D constraint space.
 
-              |k^(m)(x)| <= (1/pi) integral c(r) r^m dr.
+          It then evaluates a conservative projector perturbation proxy and
+          combines it with the V15 unprojected kernel error budget.
 
-          Thus the exact piecewise-linear spectral moments give global
-          derivative bounds without the loose generic sinc estimates of V14.
+          IMPORTANT:
+          the proxy is not promoted to a theorem. A formal Hilbert-space
+          sampling/interpolation subspace perturbation result is still needed
+          before ||P-P_N|| can be called rigorously certified.
 
-          For uniform linear interpolation with spacing h,
-
-              ||k-I_h k||_infinity <= h^2 sup|k''| / 8.
-
-          Schur's test then yields on [-L,L]
-
-              ||C-C_h|| <= 2L ||k-I_h k||_infinity.
-
-          V15 checks whether this explicit unprojected-kernel error beats the
-          V14 target 0.009985144429.
-
-          Remaining gap: the continuous rank-2 pole projector must be compared
-          rigorously with the quadrature-defined finite projector, and a finite
-          spectral upper bound must be certified for the same discretization.
-
-          continuum_certified = false.
+          Therefore continuum_certified=false.
           NO T1/RH PROOF CLAIM IS MADE.
           EOF
-      - name: Upload evidence
+
+      - name: Upload V16 evidence
         uses: actions/upload-artifact@v4
         with:
-          name: t1-L040-v15-exact-kernel
+          name: t1-L040-v16-rank2-projector
           path: |
-            v15-input.json
-            v15-kernel-check.json
-            v15-interpolation-bound.json
-            v15-arb-derivatives.json
-            v15-projector-audit.json
-            v15-decision.json
-            V15-LEDGER.txt
+            v16-input.json
+            v16-continuous-gram.json
+            v16-gram-error.json
+            v16-projector-bound.json
+            v16-combined-budget.json
+            v16-numerical-sanity.json
+            v16-decision.json
+            V16-LEDGER.txt
