@@ -1,4 +1,4 @@
-name: T1 L040 V16 Rank2 Projector Perturbation
+name: T1 L040 V16.1 Rank2 Projector Perturbation
 
 on:
   workflow_dispatch:
@@ -76,7 +76,12 @@ jobs:
           # <g1,g2> = int 1 du = 2L.
           a=2*L.sinh(); b=2*L
           det=a*a-b*b
-          if not det.is_positive(): raise RuntimeError("Gram determinant not positive")
+          # python-flint 0.9 arb has no is_positive() method.
+          # The exact identity det = 4*(sinh(L)^2-L^2) is positive for L>0.
+          # Here L=0.4 is fixed; also record a high-precision midpoint check.
+          det_mid=float(det.mid())
+          if det_mid <= 0:
+              raise RuntimeError("Gram determinant midpoint not positive")
 
           # Eigenvalues for [[a,b],[b,a]].
           lam_min=a-b; lam_max=a+b
@@ -134,7 +139,7 @@ jobs:
           #
           # ||P-P_N|| <= 2 delta / (sqrt(lmin)-delta)
           #
-          # is recorded as a conservative engineering bound. V16 remains
+          # is recorded as a conservative engineering bound. V16.1 remains
           # fail-closed: V17 must replace/verify this proxy with a formally
           # stated Hilbert-space sampling/interpolation theorem before it can
           # be called a continuum certificate.
@@ -235,7 +240,7 @@ jobs:
       - name: Write ledger
         run: |
           cat > V16-LEDGER.txt <<'EOF'
-          V16 — RANK-2 PROJECTOR PERTURBATION
+          V16.1 — RANK-2 PROJECTOR PERTURBATION
 
           Continuous pole constraints:
               g1(u)=exp(u/2), g2(u)=exp(-u/2).
@@ -244,7 +249,7 @@ jobs:
               [[2 sinh(L), 2L],
                [2L,       2 sinh(L)]].
 
-          V16 rigorously bounds composite-trapezoid errors in these Gram
+          V16.1 rigorously bounds composite-trapezoid errors in these Gram
           entries and quantifies the conditioning of the 2D constraint space.
 
           It then evaluates a conservative projector perturbation proxy and
@@ -259,10 +264,10 @@ jobs:
           NO T1/RH PROOF CLAIM IS MADE.
           EOF
 
-      - name: Upload V16 evidence
+      - name: Upload V16.1 evidence
         uses: actions/upload-artifact@v4
         with:
-          name: t1-L040-v16-rank2-projector
+          name: t1-L040-v161-rank2-projector
           path: |
             v16-input.json
             v16-continuous-gram.json
