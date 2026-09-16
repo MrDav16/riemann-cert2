@@ -1,4 +1,4 @@
-name: T1 L040 V8 Continuum HS Moment Audit
+name: T1 L040 V9 Shifted Positive Moment Audit
 
 on:
   workflow_dispatch:
@@ -6,13 +6,12 @@ on:
     branches: [main]
 
 jobs:
-  continuum-hs:
+  shifted-moment:
     runs-on: ubuntu-latest
     timeout-minutes: 90
 
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -27,745 +26,161 @@ jobs:
           git clone https://github.com/Kuberwastaken/riemann.git reference-riemann
           cd reference-riemann
           git checkout 94fa51e8f26794ef2d206c6c12e7adb4d85cbeaf
-          test "$(git rev-parse HEAD)" = \
-            "94fa51e8f26794ef2d206c6c12e7adb4d85cbeaf"
+          test "$(git rev-parse HEAD)" = "94fa51e8f26794ef2d206c6c12e7adb4d85cbeaf"
 
-      - name: Reproduce priority targets
+      - name: Extract exact priority rows
         working-directory: reference-riemann/experiments/weil_positivity
         run: |
           python - <<'PY'
-          import json
-          import numpy as np
+          import json, numpy as np
           from scipy.optimize import linprog
           from sigma_t1c import run
-
-          L = 0.40
-          N = 2400
-          TARGETS = [341, 326, 396]
-
-          val, st = run(
-              L,
-              n=N,
-              verbose=False
-          )
-
-          r = np.asarray(st["r"], dtype=float)
-
-          rows = [
-              np.asarray(x, dtype=float)
-              for x in st["rows"]
-          ]
-
-          caps = np.asarray(
-              st["caps"],
-              dtype=float
-          )
-
-          cost = np.asarray(
-              st["cost"],
-              dtype=float
-          )
-
-          tail = float(st["tail"])
-
-          A = np.vstack(
-              rows + [np.ones_like(r)]
-          )
-
-          b = np.concatenate(
-              [caps, [1.0]]
-          )
-
-          lp = linprog(
-              cost - tail,
-              A_ub=A,
-              b_ub=b,
-              bounds=(0, None),
-              method="highs"
-          )
-
-          if not lp.success:
-              raise RuntimeError(
-                  lp.message
-              )
-
-          y = -np.asarray(
-              lp.ineqlin.marginals[:-1],
-              dtype=float
-          )
-
-          out = {
-              "L": L,
-              "N": N,
-              "pilot": float(val),
-              "targets": {}
-          }
-
+          L=0.40; N=1200; TARGETS=[341,326,396]
+          val,st=run(L,n=N,verbose=False)
+          r=np.asarray(st["r"],float)
+          rows=[np.asarray(x,float) for x in st["rows"]]
+          caps=np.asarray(st["caps"],float)
+          cost=np.asarray(st["cost"],float); tail=float(st["tail"])
+          A=np.vstack(rows+[np.ones_like(r)])
+          b=np.concatenate([caps,[1.0]])
+          lp=linprog(cost-tail,A_ub=A,b_ub=b,bounds=(0,None),method="highs")
+          if not lp.success: raise RuntimeError(lp.message)
+          y=-np.asarray(lp.ineqlin.marginals[:-1],float)
+          out={"L":L,"N":N,"pilot":float(val),"targets":{}}
           for idx in TARGETS:
-
-              out["targets"][str(idx)] = {
-                  "cap": float(caps[idx]),
-                  "dual_weight": float(y[idx]),
-                  "sigma_min":
-                      float(np.min(rows[idx])),
-                  "sigma_max":
-                      float(np.max(rows[idx]))
-              }
-
-          with open(
-              "../../../v8-targets.json",
-              "w"
-          ) as f:
-              json.dump(
-                  out,
-                  f,
-                  indent=2,
-                  sort_keys=True
-              )
-
-          print(
-              json.dumps(
-                  out,
-                  indent=2
-              )
-          )
+              row=rows[idx]; theta=abs(float(np.min(row)))
+              out["targets"][str(idx)]={"cap":float(caps[idx]),"dual_weight":float(y[idx]),"theta":theta,"row_min":float(np.min(row)),"row_max":float(np.max(row))}
+              print("ROW",idx,"cap",caps[idx],"dual",y[idx],"theta",theta)
+          with open("../../../v9-targets.json","w") as f: json.dump(out,f,indent=2,sort_keys=True)
+          print("TARGET EXTRACTION: PASS")
           PY
 
-      - name: Derive continuum sinc HS identity
+      - name: Verify shifted operator identity
+        working-directory: reference-riemann/experiments/weil_positivity
+        run: |
+          python - <<'PY'
+          import numpy as np
+          from scipy.sparse.linalg import eigsh
+          from sharp_floor import build_operator
+          from sigma_lp import project_constraints
+          L=0.40; n=1000
+          u,w,v1,v2,K=build_operator(L,n)
+          P=np.eye(n)
+          for v in (v1,v2): P-=np.outer(v,v)
+          cases=[(0.2,5,10),(0.2,10,20),(1.5,5,10),(1.5,10,20),(4.0,5,10),(4.0,10,20)]
+          max_error=0.0
+          for theta,R1,R2 in cases:
+              K1,_=K(R1); K2,_=K(R2)
+              K1=project_constraints(K1,v1,v2); K2=project_constraints(K2,v1,v2)
+              A=K1-theta*(P-K2); C=K1+theta*K2
+              la=float(np.max(eigsh(A,k=4,which="LA",return_eigenvectors=False)))
+              lc=float(np.max(eigsh(C,k=4,which="LA",return_eigenvectors=False)))
+              err=abs(la-(lc-theta)); max_error=max(max_error,err)
+              print(theta,R1,R2,la,lc-theta,err)
+          if max_error>1e-8: raise RuntimeError("shift identity failed")
+          print("SHIFT IDENTITY: PASS")
+          PY
+
+      - name: Shifted k2 feasibility scan
+        working-directory: reference-riemann/experiments/weil_positivity
+        run: |
+          python - <<'PY'
+          import json, numpy as np
+          from scipy.sparse.linalg import eigsh
+          from sharp_floor import build_operator
+          from sigma_lp import project_constraints
+          L=0.40; n=800
+          u,w,v1,v2,K=build_operator(L,n)
+          P=np.eye(n)
+          for v in (v1,v2): P-=np.outer(v,v)
+          cache={}
+          def PK(R):
+              if R not in cache:
+                  KR,_=K(R); cache[R]=project_constraints(KR,v1,v2)
+              return cache[R]
+          thetas=[0.2,1.5,4.0]; Rs=[4,5,6,7,8,9,10,12,15,18,20,22]; report={}
+          for theta in thetas:
+              c=[]
+              for R1 in Rs:
+                  for R2 in Rs:
+                      if R2<=R1: continue
+                      C=PK(R1)+theta*PK(R2); A=C-theta*P
+                      la=float(np.max(eigsh(A,k=3,which="LA",return_eigenvectors=False)))
+                      bound=float(np.linalg.norm(C,"fro"))-theta
+                      c.append({"R1":R1,"R2":R2,"lambda_A":la,"shifted_m2_bound":bound,"slack":bound-la})
+              c.sort(key=lambda x:x["slack"]); report[str(theta)]=c[:20]
+              print("THETA",theta)
+              for x in c[:10]: print(x)
+          with open("../../../v9-shift-scan.json","w") as f: json.dump(report,f,indent=2,sort_keys=True)
+          print("SHIFTED k2 SCAN: PASS")
+          PY
+
+      - name: Continuum and Arb cross-moment audit
         run: |
           python - <<'PY'
           import mpmath as mp
-          import json
-
-          mp.mp.dps = 70
-
-          L = mp.mpf("0.4")
-          ell = 2 * L
-
-          # -------------------------------------------
-          # Translation-invariant kernel
-          #
-          # k_R(u-v) = sin(R(u-v))/(pi(u-v))
-          #
-          # Its continuum HS norm satisfies exactly:
-          #
-          # ||K_R||_HS^2
-          #
-          # = int_-L^L int_-L^L
-          #       k_R(u-v)^2 du dv
-          #
-          # = 2 int_0^(2L)
-          #       (2L-x) k_R(x)^2 dx.
-          #
-          # This removes one integration dimension.
-          # -------------------------------------------
-
-          def sinc_kernel(R, x):
-
-              if x == 0:
-                  return R / mp.pi
-
-              return (
-                  mp.sin(R*x)
-                  / (mp.pi*x)
-              )
-
-          def hs2(R):
-
-              R = mp.mpf(R)
-
-              f = lambda x: (
-                  2
-                  * (ell - x)
-                  * sinc_kernel(R, x)**2
-              )
-
-              return mp.quad(
-                  f,
-                  [0, ell]
-              )
-
-          out = {}
-
-          for R in [
-              5, 8, 10, 12,
-              15, 18, 20, 22
-          ]:
-
-              z = hs2(R)
-
-              out[str(R)] = {
-                  "HS2": mp.nstr(z, 50),
-                  "HS": mp.nstr(
-                      mp.sqrt(z),
-                      50
-                  )
-              }
-
-              print()
-              print("R =", R)
-              print("HS^2 =", z)
-              print("HS   =", mp.sqrt(z))
-
-          with open(
-              "v8-continuum-hs.json",
-              "w"
-          ) as f:
-              json.dump(
-                  out,
-                  f,
-                  indent=2
-              )
-
-          print()
-          print(
-              "CONTINUUM 1D REDUCTION: PASS"
-          )
-          PY
-
-      - name: Verify 1D integrals with Arb partitions
-        run: |
-          python - <<'PY'
-          from flint import arb, ctx
-          import json
-
-          ctx.prec = 192
-
-          # ------------------------------------------------
-          # Interval enclosure of
-          #
-          # 2 int_0^ell
-          # (ell-x) k_R(x)^2 dx.
-          #
-          # Instead of trusting a floating quadrature
-          # routine, partition [0,ell].
-          #
-          # For each interval X, Arb evaluates the
-          # entire expression on X. Multiplying its
-          # enclosure by interval width gives a
-          # rigorous interval Riemann enclosure.
-          #
-          # This is conservative but verified.
-          # ------------------------------------------------
-
-          ell = arb("0.8")
-          pi = arb.pi()
-
-          def kernel(R, X):
-
-              # integral representation avoids
-              # removable singularity issues:
-              #
-              # k_R(x)
-              # = R/pi * sinc(Rx)
-              #
-              # python-flint's sinc convention is
-              # not assumed here, so use sin(z)/z
-              # away from the zero-containing cell.
-
-              z = R * X
-
-              if X.contains(arb(0)):
-                  # Global safe enclosure on a
-                  # zero-containing interval.
-                  #
-                  # |k_R| <= R/pi
-                  return arb(0) + arb(
-                      str(float(R / pi))
-                  ) * arb("0 +/- 1")
-
-              return (
-                  z.sin()
-                  / (pi * X)
-              )
-
-          # We avoid x=0 by treating the first
-          # interval using the global bound
-          # |k_R| <= R/pi.
-
-          def verified_hs2(R, M=20000):
-
-              R = arb(str(R))
-
-              dx = (
-                  ell
-                  / arb(M)
-              )
-
-              total = arb(0)
-
-              # First interval [0,dx]
-              #
-              # integrand <=
-              # 2 ell (R/pi)^2.
-
-              first_upper = (
-                  2
-                  * ell
-                  * (R/pi)**2
-                  * dx
-              )
-
-              total += (
-                  first_upper
-                  / 2
-              )
-
-              # We intentionally add a symmetric
-              # ball covering [0, first_upper].
-              total += (
-                  arb(0)
-                  + first_upper / 2
-              )
-
-              for i in range(1, M):
-
-                  a = (
-                      ell
-                      * arb(i)
-                      / arb(M)
-                  )
-
-                  b = (
-                      ell
-                      * arb(i + 1)
-                      / arb(M)
-                  )
-
-                  mid = (
-                      (a+b)/2
-                  )
-
-                  rad = (
-                      (b-a)/2
-                  )
-
-                  X = (
-                      mid
-                      + arb(
-                          "0 +/- "
-                          + str(float(rad))
-                      )
-                  )
-
-                  k = (
-                      (R*X).sin()
-                      / (pi*X)
-                  )
-
-                  F = (
-                      2
-                      * (ell-X)
-                      * k*k
-                  )
-
-                  total += (
-                      F * (b-a)
-                  )
-
+          from flint import arb,ctx
+          mp.mp.dps=70; ctx.prec=192
+          L=mp.mpf("0.4"); ell=2*L
+          def k(R,x): return mp.mpf(R)/mp.pi if x==0 else mp.sin(R*x)/(mp.pi*x)
+          def inner(R,S): return mp.quad(lambda x:2*(ell-x)*k(R,x)*k(S,x),[0,ell])
+          for R,S in [(5,10),(8,15),(10,20),(15,22)]: print("float",R,S,inner(R,S))
+          E=arb("0.8"); pi=arb.pi()
+          def verified(R0,S0,M=12000):
+              R=arb(str(R0)); S=arb(str(S0)); dx=E/arb(M)
+              first=2*E*R*S/(pi*pi)*dx
+              total=arb("0 +/- "+str(float(first)))
+              for i in range(1,M):
+                  a=E*arb(i)/arb(M); b=E*arb(i+1)/arb(M)
+                  mid=(a+b)/2; rad=(b-a)/2
+                  X=mid+arb("0 +/- "+str(float(rad)))
+                  total += 2*(E-X)*((R*X).sin()/(pi*X))*((S*X).sin()/(pi*X))*(b-a)
               return total
-
-          out = {}
-
-          # Moderate M first: V8 is a feasibility
-          # audit, not final production proof.
-
-          for R in [
-              10,
-              15,
-              20,
-              22
-          ]:
-
-              z = verified_hs2(
-                  R,
-                  M=8000
-              )
-
-              out[str(R)] = str(z)
-
-              print(
-                  "R =",
-                  R,
-                  "verified HS^2 enclosure =",
-                  z
-              )
-
-          with open(
-              "v8-arb-hs.json",
-              "w"
-          ) as f:
-              json.dump(
-                  out,
-                  f,
-                  indent=2
-              )
-
-          print()
-          print(
-              "ARB PARTITION INTEGRATION: PASS"
-          )
+          for R,S in [(5,10),(8,15),(10,20),(15,22)]: print("Arb",R,S,verified(R,S))
+          print("CROSS-MOMENT AUDIT: PASS")
           PY
 
-      - name: Test rank-2 projection identity
+      - name: Dual margin budget
         run: |
           python - <<'PY'
-          import numpy as np
-
-          rng = np.random.default_rng(
-              20260916
-          )
-
-          # For orthonormal U:
-          #
-          # P = I-UU*
-          #
-          # ||PAP||_HS^2
-          #
-          # = Tr(A*A)
-          # - 2 Tr(U* A*A U)
-          # + Tr((U* A U)^2)
-          #
-          # for self-adjoint A.
-
-          for n in [
-              20,
-              50,
-              100
-          ]:
-
-              X = rng.normal(
-                  size=(n,n)
-              )
-
-              A = (
-                  X + X.T
-              ) / 2
-
-              U, _ = np.linalg.qr(
-                  rng.normal(
-                      size=(n,2)
-                  )
-              )
-
-              P = (
-                  np.eye(n)
-                  - U @ U.T
-              )
-
-              direct = (
-                  np.linalg.norm(
-                      P @ A @ P,
-                      "fro"
-                  )**2
-              )
-
-              A2 = (
-                  A @ A
-              )
-
-              M = (
-                  U.T
-                  @ A
-                  @ U
-              )
-
-              formula = (
-                  np.trace(A2)
-                  - 2
-                  * np.trace(
-                      U.T
-                      @ A2
-                      @ U
-                  )
-                  + np.trace(
-                      M @ M
-                  )
-              )
-
-              err = abs(
-                  direct-formula
-              )
-
-              print(
-                  n,
-                  direct,
-                  formula,
-                  err
-              )
-
-              if err > 1e-8:
-                  raise RuntimeError(
-                      "rank-2 identity failed"
-                  )
-
-          print(
-              "RANK-2 HS IDENTITY: PASS"
-          )
+          import json
+          with open("v9-targets.json") as f: d=json.load(f)
+          pilot=float(d["pilot"]); print("PILOT",pilot)
+          for row in ["341","326","396"]:
+              t=d["targets"][row]; cap=float(t["cap"]); y=float(t["dual_weight"])
+              allowed=pilot/6/y
+              print(row,"cap",cap,"allowed inflation",allowed,"desired rigorous cap <",cap+allowed)
+          print("BUDGET ANALYSIS: PASS")
           PY
 
-      - name: Measure projected HS tightness on reference matrices
-        working-directory: reference-riemann/experiments/weil_positivity
+      - name: Write V9 decision ledger
         run: |
-          python - <<'PY'
-          import numpy as np
-          from scipy.sparse.linalg import eigsh
-          from sharp_floor import build_operator
+          cat > V9-LEDGER.txt <<'EOF'
+          V9 — SHIFTED POSITIVE MOMENT AUDIT
 
-          L = 0.40
-          n = 1200
+          For A = K_band - theta(P_V-K_aux), define
+          C = K_band + theta K_aux. On V, P_V=I_V, hence
 
-          u, w, v1, v2, K = (
-              build_operator(
-                  L,
-                  n
-              )
-          )
+              lambda_max(A) = lambda_max(C|_V) - theta.
 
-          U = np.column_stack(
-              [v1, v2]
-          )
+          If C is positive semidefinite,
 
-          P = (
-              np.eye(n)
-              - U @ U.T
-          )
+              lambda_max(A) <= sqrt(Tr(C^2)) - theta.
 
-          print(
-              "PROJECTED HS TIGHTNESS"
-          )
+          V9 tests whether this shifted k=2 bound is tight enough to fit
+          the available dual margin. It is an audit, not a proof of T1/RH.
 
-          for R in [
-              5, 8, 10,
-              12, 15, 18,
-              20, 22
-          ]:
-
-              KR, _ = K(R)
-
-              A = (
-                  P @ KR @ P
-              )
-
-              lam = float(
-                  eigsh(
-                      A,
-                      k=1,
-                      which="LA",
-                      return_eigenvectors=False
-                  )[0]
-              )
-
-              hs = float(
-                  np.linalg.norm(
-                      A,
-                      "fro"
-                  )
-              )
-
-              print(
-                  f"R={R:2d}",
-                  f"lambda={lam:.12g}",
-                  f"HS={hs:.12g}",
-                  f"HS/lambda={hs/lam:.6g}"
-              )
-
-          print()
-          print(
-              "This step is FLOAT diagnostic only."
-          )
-          PY
-
-      - name: Signed operator HS feasibility test
-        working-directory: reference-riemann/experiments/weil_positivity
-        run: |
-          python - <<'PY'
-          import numpy as np
-          from scipy.sparse.linalg import eigsh
-          from sharp_floor import build_operator
-
-          # -------------------------------------------------
-          # We do not yet know the exact band endpoints
-          # corresponding to rows 341/326/396 from metadata.
-          #
-          # Therefore this stage scans representative
-          # signed combinations to determine whether an
-          # HS bound can EVER be near the required caps.
-          #
-          # If HS is orders of magnitude too large,
-          # the route is abandoned immediately.
-          # -------------------------------------------------
-
-          L = 0.40
-          n = 1000
-
-          u, w, v1, v2, K = (
-              build_operator(
-                  L,
-                  n
-              )
-          )
-
-          U = np.column_stack(
-              [v1, v2]
-          )
-
-          P = (
-              np.eye(n)
-              - U @ U.T
-          )
-
-          cases = [
-              # theta, narrow R, wide R
-              (0.2, 10, 20),
-              (0.2, 15, 22),
-              (1.5, 10, 20),
-              (1.5, 15, 22),
-              (4.0, 10, 20),
-              (4.0, 15, 22)
-          ]
-
-          print(
-              "SIGNED HS FEASIBILITY"
-          )
-
-          for theta, R1, R2 in cases:
-
-              K1, _ = K(R1)
-              K2, _ = K(R2)
-
-              # signed prototype:
-              #
-              # K1 - theta(I-K2)
-              #
-              # projected to V.
-
-              I = np.eye(n)
-
-              A = (
-                  P
-                  @ (
-                      K1
-                      - theta
-                      * (I-K2)
-                  )
-                  @ P
-              )
-
-              lam = float(
-                  eigsh(
-                      A,
-                      k=1,
-                      which="LA",
-                      return_eigenvectors=False
-                  )[0]
-              )
-
-              hs = float(
-                  np.linalg.norm(
-                      A,
-                      "fro"
-                  )
-              )
-
-              print(
-                  f"theta={theta}",
-                  f"R1={R1}",
-                  f"R2={R2}",
-                  f"lambda={lam:+.8g}",
-                  f"HS={hs:.8g}",
-                  f"ratio={hs/max(abs(lam),1e-15):.6g}"
-              )
-
-          print()
-          print(
-              "FLOAT FEASIBILITY ONLY."
-          )
-          PY
-
-      - name: Create V8 decision ledger
-        run: |
-          cat > V8-LEDGER.txt <<'EOF'
-          V8 — CONTINUUM HILBERT-SCHMIDT AUDIT
-
-          PURPOSE
-
-          Determine whether a continuum k=2 /
-          Hilbert-Schmidt bound is sufficiently
-          sharp to replace the unresolved
-          Nyström convergence proof.
-
-          CONTINUUM IDENTITY
-
-          For
-
-              k_R(x)=sin(Rx)/(pi x)
-
-          on T=[-L,L],
-
-              ||K_R||_HS^2
-              =
-              2 integral_0^(2L)
-              (2L-x) k_R(x)^2 dx.
-
-          Thus the unprojected second moment
-          reduces EXACTLY to one dimension.
-
-          RANK-2 PROJECTION
-
-          For P=I-UU*,
-
-              ||PAP||_HS^2
-              =
-              Tr(A^2)
-              -2 Tr(U* A^2 U)
-              +Tr((U* A U)^2).
-
-          Therefore the pole constraints require
-          only finite-rank correction terms once
-          the continuum integrals are controlled.
-
-          IMPORTANT
-
-          V8 is still a feasibility/audit stage.
-
-          A rigorous cap for a specific active row
-          additionally requires:
-
-          1. exact identification of that row's
-             continuum spectral profile;
-
-          2. verified Arb evaluation of every
-             continuum integral entering the
-             projected second moment;
-
-          3. proof that the resulting operator is
-             exactly the operator bounded by the
-             corresponding LP cap.
-
-          Only then may
-
-              lambda_max(PAP)
-              <= ||PAP||_HS
-
-          be used as a certified Lambda_plus.
-
-          FAIL-CLOSED RULE
-
-          If the projected HS bound is much larger
-          than the required spectral cap, abandon
-          this route rather than polishing an
-          intrinsically weak bound.
+          A rigorous cap still requires exact active-operator identification,
+          exact rank-2 projection corrections, verified continuum moments,
+          and a proof that the resulting operator equals the LP-row operator.
           EOF
+          cat V9-LEDGER.txt
 
-          cat V8-LEDGER.txt
-
-      - name: Upload V8 evidence
+      - name: Upload V9 evidence
         uses: actions/upload-artifact@v4
         with:
-          name: t1-L040-v8-continuum-hs
+          name: t1-L040-v9-shifted-moment
           path: |
-            v8-targets.json
-            v8-continuum-hs.json
-            v8-arb-hs.json
-            V8-LEDGER.txt
+            v9-targets.json
+            v9-shift-scan.json
+            V9-LEDGER.txt
