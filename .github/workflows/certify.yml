@@ -1,4 +1,4 @@
-name: T1 L040 V27 Signed-Cap Operator Identity Audit
+name: T1 L040 V27.1 Signed-Cap Operator Identity Audit
 
 on:
   workflow_dispatch:
@@ -33,6 +33,7 @@ jobs:
           cat > v27.py <<'PY'
           import json,numpy as np
           from scipy.sparse.linalg import eigsh
+          from scipy.linalg import eigh
           from sharp_floor import build_operator
           from sigma_lp import project_constraints
           from sigma_t1b import profile_operator,tent
@@ -60,8 +61,11 @@ jobs:
           ]
 
           def top(A):
-              return float(np.max(eigsh((A+A.T)/2,k=6,which="LA",
-                                        return_eigenvectors=False)))
+              S=(A+A.T)/2
+              n=S.shape[0]
+              return float(eigh(S,eigvals_only=True,
+                                subset_by_index=[n-1,n-1],
+                                check_finite=False)[0])
           def bandop(R):
               KR,_=K(R);return project_constraints(KR,v1,v2)
 
@@ -188,7 +192,7 @@ jobs:
       - name: Write ledger
         run: |
           cat > V27-LEDGER.txt <<'EOF'
-          V27 — SIGNED-CAP OPERATOR IDENTITY AUDIT
+          V27.1 — SIGNED-CAP OPERATOR IDENTITY AUDIT
 
           Goal:
           explain why naive profile_operator(sigma) in V26.1 does not reproduce
@@ -201,7 +205,7 @@ jobs:
           a finite-r truncated numerical integral operator K_1. These are not
           interchangeable.
 
-          V27 tests whether the full discrepancy is exactly theta*(P-K_1).
+          V27.1 tests whether the full discrepancy is exactly theta*(P-K_1).
           If so, the signed caps must be certified compositionally from their
           primitive operator pieces rather than by treating the stored sampled
           sigma array as a standalone finite-r profile.
@@ -214,15 +218,15 @@ jobs:
 
       - name: Hash and upload V27 evidence
         run: |
-          sha256sum v27-identities.json v27-family-theorems.json v27-verdict.json V27-LEDGER.txt > V27-MANIFEST.sha256
-          sha256sum -c V27-MANIFEST.sha256
+          sha256sum v27-identities.json v27-family-theorems.json v27-verdict.json V27-LEDGER.txt > V27.1-MANIFEST.sha256
+          sha256sum -c V27.1-MANIFEST.sha256
 
       - uses: actions/upload-artifact@v4
         with:
-          name: t1-L040-v27-operator-identities
+          name: t1-L040-v271-operator-identities
           path: |
             v27-identities.json
             v27-family-theorems.json
             v27-verdict.json
             V27-LEDGER.txt
-            V27-MANIFEST.sha256
+            V27.1-MANIFEST.sha256
