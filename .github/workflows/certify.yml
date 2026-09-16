@@ -1,4 +1,4 @@
-name: T1 L040 V10 Exact Active Row Reconstruction
+name: T1 L040 V10.1 Direct Shifted Active Rows
 
 on:
   workflow_dispatch:
@@ -6,10 +6,9 @@ on:
     branches: [main]
 
 jobs:
-  exact-active-rows:
+  direct-shift:
     runs-on: ubuntu-latest
     timeout-minutes: 90
-
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -19,7 +18,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install numpy scipy mpmath python-flint
+          pip install numpy scipy
 
       - name: Fetch pinned reference
         run: |
@@ -28,175 +27,43 @@ jobs:
           git checkout 94fa51e8f26794ef2d206c6c12e7adb4d85cbeaf
           test "$(git rev-parse HEAD)" = "94fa51e8f26794ef2d206c6c12e7adb4d85cbeaf"
 
-      - name: Instrument exact active signed rows
+      - name: Extract exact rows and dual
         working-directory: reference-riemann/experiments/weil_positivity
         run: |
           python - <<'PY'
-          import json
-          import numpy as np
-          import sigma_t1c
-          from sigma_t1b import tent
+          import json, numpy as np
           from scipy.optimize import linprog
+          from sigma_t1c import run
 
-          L=0.40
-          N=1200
-          TARGETS=[341,326,396]
-
-          # First reproduce the final row list and dual.
-          val,st=sigma_t1c.run(L,n=N,verbose=False)
+          L=0.40; N=1200; TARGETS=[341,326,396]
+          val,st=run(L,n=N,verbose=False)
           r=np.asarray(st["r"],float)
           rows=[np.asarray(x,float) for x in st["rows"]]
           caps=np.asarray(st["caps"],float)
-          cost=np.asarray(st["cost"],float)
-          tail=float(st["tail"])
-
-          AA=np.vstack(rows+[np.ones_like(r)])
-          bb=np.concatenate([caps,[1.0]])
-          lp=linprog(cost-tail,A_ub=AA,b_ub=bb,bounds=(0,None),method="highs")
+          cost=np.asarray(st["cost"],float); tail=float(st["tail"])
+          A=np.vstack(rows+[np.ones_like(r)])
+          b=np.concatenate([caps,[1.0]])
+          lp=linprog(cost-tail,A_ub=A,b_ub=b,bounds=(0,None),method="highs")
           if not lp.success: raise RuntimeError(lp.message)
-          dual=-np.asarray(lp.ineqlin.marginals[:-1],float)
+          y=-np.asarray(lp.ineqlin.marginals[:-1],float)
 
-          # Infer exact signed-row structure from the row vector itself.
-          # Rows generated in stage-6 have either:
-          #   band - theta * 1_{r>cut}
-          # or
-          #   band - theta * (1-wide)
-          #
-          # Search the same tent parameter grid induced by clusters is hard
-          # to replay externally, so identify exact equality against candidate
-          # tent supports read directly from breakpoints of the stored row.
-
-          def breakpoints(x):
-              d=np.diff(x)
-              ids=np.where(np.abs(d)>1e-10)[0]
-              return [float(r[i]) for i in ids]
-
-          out={
-              "L":L,"N":N,"pilot":float(val),
-              "targets":{}
-          }
-
+          out={"L":L,"N":N,"pilot":float(val),"r":r.tolist(),"targets":{}}
           for idx in TARGETS:
-              row=rows[idx]
-              theta=abs(float(np.min(row)))
-              negmask=row < -1e-10
-              zeromask=np.abs(row) <= 1e-10
-              posmask=row > 1e-10
-
-              item={
+              sig=rows[idx]; theta=abs(float(sig.min()))
+              out["targets"][str(idx)]={
                   "cap":float(caps[idx]),
-                  "dual_weight":float(dual[idx]),
+                  "dual_weight":float(y[idx]),
                   "theta":theta,
-                  "row_min":float(row.min()),
-                  "row_max":float(row.max()),
-                  "negative_r_min":float(r[negmask].min()) if np.any(negmask) else None,
-                  "negative_r_max":float(r[negmask].max()) if np.any(negmask) else None,
-                  "positive_r_min":float(r[posmask].min()) if np.any(posmask) else None,
-                  "positive_r_max":float(r[posmask].max()) if np.any(posmask) else None,
-                  "breakpoints":breakpoints(row),
-                  "row_values":row.tolist()
+                  "sigma":sig.tolist()
               }
-              out["targets"][str(idx)]=item
-              print("\nROW",idx)
-              for k,v in item.items():
-                  if k!="row_values": print(k,"=",v)
+              print(idx,"cap",caps[idx],"y",y[idx],"theta",theta)
 
-          with open("../../../v10-active-rows.json","w") as f:
+          with open("../../../v101-input.json","w") as f:
               json.dump(out,f,indent=2,sort_keys=True)
-
-          print("\nEXACT STORED ROW EXTRACTION: PASS")
+          print("INPUT EXTRACTION: PASS")
           PY
 
-      - name: Classify tail versus wide form
-        run: |
-          python - <<'PY'
-          import json, numpy as np
-
-          with open("v10-active-rows.json") as f:
-              d=json.load(f)
-
-          r=np.arange(0.0,22.0+1e-9,0.05)
-
-          def tent(r,lo,hi):
-              # same definition will be checked against source-generated row
-              c=(lo+hi)/2
-              h=(hi-lo)/2
-              if h<=0: return np.zeros_like(r)
-              return np.maximum(1.0-np.abs(r-c)/h,0.0)
-
-          classifications={}
-
-          # Brute-force exact grid search over tent endpoints on 0.05 grid.
-          # This is diagnostic reconstruction of the stored sigma row.
-          # Search only around nontrivial support to keep cost modest.
-          for key,item in d["targets"].items():
-              row=np.asarray(item["row_values"],float)
-              theta=float(item["theta"])
-              best=None
-
-              # Candidate tail form:
-              # tent(lo,hi) - theta * 1_{r>cut}
-              for ilo in range(len(r)):
-                  lo=r[ilo]
-                  if lo>22: break
-                  for ihi in range(ilo+2,len(r),1):
-                      hi=r[ihi]
-                      band=tent(r,lo,hi)
-                      # derive plausible cut from negative transition
-                      for cut in np.arange(max(hi,0),22.0001,0.25):
-                          cand=band-theta*(r>cut)
-                          err=float(np.max(np.abs(cand-row)))
-                          if best is None or err<best["error"]:
-                              best={"type":"tail","lo":float(lo),"hi":float(hi),
-                                    "cut":float(cut),"error":err}
-                          if err<1e-12: break
-                      if best["error"]<1e-12: break
-                  if best["error"]<1e-12: break
-
-              # Candidate wide form. Search local endpoint grid inferred from
-              # positive/negative transitions, not every 4-D combination.
-              # sigma = band - theta*(1-wide)
-              if best is None or best["error"]>=1e-12:
-                  nz=np.where(np.abs(row+theta)>1e-8)[0]
-                  if len(nz):
-                      lo0=max(0.0,r[nz[0]]-3.0)
-                      hi0=min(22.0,r[nz[-1]]+3.0)
-                  else:
-                      lo0=0.0; hi0=22.0
-
-                  vals=np.arange(lo0,hi0+1e-9,0.05)
-                  # infer wide = (row-band+theta)/theta; search band first
-                  for lo in vals:
-                      for hi in vals:
-                          if hi<=lo+0.05: continue
-                          band=tent(r,lo,hi)
-                          wide=(row-band+theta)/theta
-                          # wide must itself look like a tent in [0,1]
-                          if wide.min()<-1e-8 or wide.max()>1+1e-8: continue
-                          ids=np.where(wide>1e-8)[0]
-                          if not len(ids): continue
-                          wlo=max(0.0,r[ids[0]]-0.05)
-                          whi=min(22.0,r[ids[-1]]+0.05)
-                          wcand=tent(r,wlo,whi)
-                          cand=band-theta*(1-wcand)
-                          err=float(np.max(np.abs(cand-row)))
-                          if best is None or err<best["error"]:
-                              best={"type":"wide","lo":float(lo),"hi":float(hi),
-                                    "wide_lo":float(wlo),"wide_hi":float(whi),
-                                    "error":err}
-                          if err<1e-12: break
-                      if best is not None and best["error"]<1e-12: break
-
-              classifications[key]=best
-              print("ROW",key,"=>",best)
-
-          with open("v10-classification.json","w") as f:
-              json.dump(classifications,f,indent=2,sort_keys=True)
-
-          print("ROW CLASSIFICATION COMPLETE")
-          PY
-
-      - name: Exact operator reconstruction from sigma rows
+      - name: Direct shifted reconstruction at multiple n
         working-directory: reference-riemann/experiments/weil_positivity
         run: |
           python - <<'PY'
@@ -205,203 +72,174 @@ jobs:
           from sharp_floor import build_operator
           from sigma_t1b import profile_operator
 
-          with open("../../../v10-active-rows.json") as f:
-              d=json.load(f)
-
-          L=0.40; n=700
-          u,w,v1,v2,K=build_operator(L,n)
-          U=np.column_stack([v1,v2]); Q=null_space(U.T)
-          r=np.arange(0.0,22.0+1e-9,0.05)
-
-          out={}
-          for key,item in d["targets"].items():
-              sig=np.asarray(item["row_values"],float)
-
-              # This reconstructs the exact finite operator from the exact
-              # stored sigma profile, avoiding guesses about lo/hi/cut.
-              A=profile_operator(sig,r,u,w,v1,v2)
-              AV=Q.T@A@Q
-              lam=float(eigvalsh(
-                  AV,
-                  subset_by_index=[AV.shape[0]-1,AV.shape[0]-1]
-              )[0])
-
-              ref=float(item["cap"])
-              err=abs(lam-ref)
-
-              out[key]={
-                  "reference_cap_n1200":ref,
-                  "reconstructed_cap_n700":lam,
-                  "cross_n_error":err
-              }
-              print("ROW",key,out[key])
-
-          with open("../../../v10-exact-operator.json","w") as f:
-              json.dump(out,f,indent=2,sort_keys=True)
-
-          print("EXACT SIGMA OPERATOR RECONSTRUCTION: PASS")
-          PY
-
-      - name: Exact shifted positive decomposition from sigma
-        working-directory: reference-riemann/experiments/weil_positivity
-        run: |
-          python - <<'PY'
-          import json, numpy as np
-          from scipy.linalg import null_space, eigvalsh
-          from sharp_floor import build_operator
-          from sigma_t1b import profile_operator
-
-          with open("../../../v10-active-rows.json") as f:
-              d=json.load(f)
-
-          L=0.40; n=600
-          u,w,v1,v2,K=build_operator(L,n)
-          U=np.column_stack([v1,v2]); Q=null_space(U.T)
-          r=np.arange(0.0,22.0+1e-9,0.05)
-
+          with open("../../../v101-input.json") as f: d=json.load(f)
+          r=np.asarray(d["r"],float)
+          ns=[400,600,800,1200]
           report={}
 
           for key,item in d["targets"].items():
-              sig=np.asarray(item["row_values"],float)
+              sig=np.asarray(item["sigma"],float)
               theta=float(item["theta"])
-
-              # Exact pointwise shift:
-              # c(r)=sigma(r)+theta >= 0 for these rows.
               c=sig+theta
-              if np.min(c)<-1e-10:
-                  raise RuntimeError(f"row {key}: shifted profile not nonnegative")
+              if c.min() < -1e-12:
+                  raise RuntimeError(f"{key}: shifted profile negative")
+              report[key]={"theta":theta,"cap_reference":float(item["cap"]),"by_n":{}}
 
-              A=profile_operator(sig,r,u,w,v1,v2)
-              C=profile_operator(c,r,u,w,v1,v2)
+              for n in ns:
+                  u,w,v1,v2,K=build_operator(0.40,n)
+                  U=np.column_stack([v1,v2])
+                  Q=null_space(U.T)
+                  C=profile_operator(c,r,u,w,v1,v2)
+                  CV=Q.T@C@Q
 
-              AV=Q.T@A@Q
-              CV=Q.T@C@Q
+                  lamC=float(eigvalsh(
+                      CV,
+                      subset_by_index=[CV.shape[0]-1,CV.shape[0]-1]
+                  )[0])
+                  shifted=lamC-theta
+                  k2=float(np.linalg.norm(CV,"fro"))-theta
 
-              lamA=float(eigvalsh(AV,subset_by_index=[AV.shape[0]-1,AV.shape[0]-1])[0])
-              lamC=float(eigvalsh(CV,subset_by_index=[CV.shape[0]-1,CV.shape[0]-1])[0])
-              identity_error=abs(lamA-(lamC-theta))
+                  z={
+                      "lambda_C_minus_theta":shifted,
+                      "k2_bound":k2,
+                      "cap_error":shifted-float(item["cap"]),
+                      "k2_inflation_over_reference":k2-float(item["cap"])
+                  }
+                  report[key]["by_n"][str(n)]=z
+                  print("ROW",key,"n",n,z)
 
-              # k=2 / Frobenius bound on exact shifted finite operator.
-              k2=float(np.linalg.norm(CV,"fro"))-theta
-              slack=k2-lamA
-
-              report[key]={
-                  "theta":theta,
-                  "shifted_profile_min":float(np.min(c)),
-                  "shifted_profile_max":float(np.max(c)),
-                  "lambda_A":lamA,
-                  "lambda_C_minus_theta":lamC-theta,
-                  "identity_error":identity_error,
-                  "exact_shifted_k2_bound_finite":k2,
-                  "k2_slack":slack
-              }
-              print("\nROW",key)
-              for k,v in report[key].items(): print(k,"=",v)
-
-              if identity_error>1e-8:
-                  raise RuntimeError(f"row {key}: shift identity failed")
-
-          with open("../../../v10-exact-shifted-k2.json","w") as f:
+          with open("../../../v101-direct-shift.json","w") as f:
               json.dump(report,f,indent=2,sort_keys=True)
-
-          print("\nEXACT ACTIVE SHIFTED-k2 AUDIT: PASS")
+          print("DIRECT SHIFTED RECONSTRUCTION: PASS")
           PY
 
-      - name: Compare exact active k2 with dual margin
+      - name: Convergence sanity check
         run: |
           python - <<'PY'
           import json
-          with open("v10-active-rows.json") as f: d=json.load(f)
-          with open("v10-exact-shifted-k2.json") as f: k=json.load(f)
+          with open("v101-direct-shift.json") as f: d=json.load(f)
 
-          pilot=float(d["pilot"])
-          total_loss=0.0
-          report={}
+          for row,x in d.items():
+              vals=[x["by_n"][str(n)]["lambda_C_minus_theta"] for n in [400,600,800,1200]]
+              ref=x["cap_reference"]
+              print("\nROW",row,"reference",ref)
+              print("shifted caps",vals)
+              print("n1200 error",vals[-1]-ref)
 
-          for row in ["341","326","396"]:
-              cap=float(d["targets"][row]["cap"])
-              y=float(d["targets"][row]["dual_weight"])
-              bound=float(k[row]["exact_shifted_k2_bound_finite"])
-              inflation=max(bound-cap,0.0)
-              loss=y*inflation
-              total_loss+=loss
-              report[row]={
-                  "cap":cap,"k2_bound":bound,"inflation":inflation,
-                  "dual_weight":y,"weighted_loss":loss
-              }
-              print("ROW",row,report[row])
+              # At n=1200, direct shifted construction should reproduce
+              # the same cap to a tight numerical tolerance.
+              if abs(vals[-1]-ref)>5e-6:
+                  raise RuntimeError(
+                      f"row {row}: direct shifted n1200 does not reproduce cap"
+                  )
 
-          remaining=pilot-total_loss
-          report["pilot"]=pilot
-          report["total_priority_loss"]=total_loss
-          report["remaining_after_priority_k2"]=remaining
-
-          print("\npilot =",pilot)
-          print("priority weighted loss =",total_loss)
-          print("remaining =",remaining)
-
-          with open("v10-dual-impact.json","w") as f:
-              json.dump(report,f,indent=2,sort_keys=True)
-
-          if remaining>0:
-              print("V10 FEASIBILITY RESULT: PRIORITY k2 ROUTE PRESERVES POSITIVE PILOT MARGIN")
-          else:
-              print("V10 FEASIBILITY RESULT: PRIORITY k2 ROUTE EXHAUSTS PILOT MARGIN")
-
-          print("IMPORTANT: finite-dimensional feasibility only; not continuum certification.")
+          print("\nDIRECT SHIFT CAP REPRODUCTION: PASS")
           PY
 
-      - name: Write V10 ledger
+      - name: Compute exact priority dual impact
         run: |
-          cat > V10-LEDGER.txt <<'EOF'
-          V10 â€” EXACT ACTIVE ROW RECONSTRUCTION
+          python - <<'PY'
+          import json
+          with open("v101-input.json") as f: inp=json.load(f)
+          with open("v101-direct-shift.json") as f: d=json.load(f)
 
-          This workflow stops using generic R1/R2 prototypes.
+          pilot=float(inp["pilot"])
+          total=0.0
+          out={}
 
-          For rows 341, 326 and 396 it extracts the exact stored sigma profile
-          produced by the pinned reference run, reconstructs its finite
-          operator, and forms the exact nonnegative shifted profile
+          for row in ["341","326","396"]:
+              cap=float(inp["targets"][row]["cap"])
+              y=float(inp["targets"][row]["dual_weight"])
+              k2=float(d[row]["by_n"]["1200"]["k2_bound"])
+              inflation=max(k2-cap,0.0)
+              loss=y*inflation
+              total+=loss
+              out[row]={
+                  "cap":cap,"dual_weight":y,
+                  "k2_bound_n1200":k2,
+                  "inflation":inflation,
+                  "weighted_loss":loss
+              }
+              print("ROW",row,out[row])
 
-              c(r) = sigma(r) + theta.
+          remaining=pilot-total
+          out["pilot"]=pilot
+          out["total_priority_loss"]=total
+          out["remaining_margin"]=remaining
 
-          Since sigma(r) >= -theta,
+          print("\npilot =",pilot)
+          print("total priority k2 loss =",total)
+          print("remaining margin =",remaining)
 
-              c(r) >= 0,
+          if remaining>0:
+              verdict="VIABLE_PRIORITY_K2"
+          else:
+              verdict="PRIORITY_K2_EXHAUSTS_MARGIN"
 
-          and on the constrained space V,
+          out["verdict"]=verdict
+          print("VERDICT =",verdict)
 
-              A_sigma = C_c - theta I_V.
+          with open("v101-dual-impact.json","w") as f:
+              json.dump(out,f,indent=2,sort_keys=True)
+          PY
 
-          Therefore
+      - name: Fail-closed interpretation
+        run: |
+          python - <<'PY'
+          import json
+          with open("v101-dual-impact.json") as f: d=json.load(f)
 
-              lambda_max(A_sigma)
-              = lambda_max(C_c) - theta
+          print("="*72)
+          print("V10.1 RESULT")
+          print("="*72)
+          print("Priority finite-dimensional verdict:",d["verdict"])
+          print("Remaining pilot margin:",d["remaining_margin"])
+          print()
+          print("This does NOT certify the continuum caps.")
+          print("If viable, next step is rigorous continuum k=2 evaluation")
+          print("with rank-2 projection corrections for the exact shifted profiles.")
+          PY
 
-          and the k=2 feasibility bound is
+      - name: Write ledger
+        run: |
+          cat > V101-LEDGER.txt <<'EOF'
+          V10.1 — DIRECT SHIFTED ACTIVE-ROW TEST
 
-              lambda_max(A_sigma)
-              <= sqrt(Tr_V(C_c^2)) - theta.
+          V10 showed that profile_operator(sigma) is not the original signed
+          operator construction. Therefore V10.1 does not use it.
 
-          V10 measures the loss caused by replacing each active numerical cap
-          with this exact-active-row finite-dimensional k=2 bound.
+          Instead, for each exact stored active profile sigma and
+          theta = -min(sigma), it forms
 
-          This is NOT a continuum proof and NOT a proof of T1/RH.
+              c = sigma + theta >= 0
 
-          If the priority dual margin remains positive, the next task is to
-          derive the continuum kernel corresponding to each exact shifted
-          piecewise-linear profile and rigorously enclose Tr_V(C_c^2),
-          including the rank-2 pole corrections.
+          and directly constructs C_c.
+
+          The numerical test checks whether
+
+              lambda_max(C_c|V) - theta
+
+          reproduces the reference active cap at n=1200.
+
+          Only if that reproduction succeeds do we use
+
+              sqrt(Tr_V(C_c^2)) - theta
+
+          as a finite-dimensional k=2 feasibility bound and charge its
+          inflation against the exact LP dual weights.
+
+          This is still NOT a rigorous continuum certificate and NOT a proof
+          of T1 or RH. A successful V10.1 only justifies proceeding to
+          rigorous continuum moment evaluation and rank-2 corrections.
           EOF
-          cat V10-LEDGER.txt
+          cat V101-LEDGER.txt
 
-      - name: Upload V10 evidence
+      - name: Upload V10.1 evidence
         uses: actions/upload-artifact@v4
         with:
-          name: t1-L040-v10-exact-active
+          name: t1-L040-v101-direct-shift
           path: |
-            v10-active-rows.json
-            v10-classification.json
-            v10-exact-operator.json
-            v10-exact-shifted-k2.json
-            v10-dual-impact.json
-            V10-LEDGER.txt
+            v101-input.json
+            v101-direct-shift.json
+            v101-dual-impact.json
+            V101-LEDGER.txt
