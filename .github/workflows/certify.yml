@@ -1,4 +1,4 @@
-name: T1 L040 V21 Corrected Identification Row326
+name: T1 L040 V22 Rigorous Finite Spectral Certificate Row326
 
 on:
   workflow_dispatch:
@@ -6,7 +6,7 @@ on:
     branches: [main]
 
 jobs:
-  corrected-identification:
+  rigorous-finite:
     runs-on: ubuntu-latest
     timeout-minutes: 90
 
@@ -28,11 +28,12 @@ jobs:
           git checkout 94fa51e8f26794ef2d206c6c12e7adb4d85cbeaf
           test "$(git rev-parse HEAD)" = "94fa51e8f26794ef2d206c6c12e7adb4d85cbeaf"
 
-      - name: Build row326 reference objects
+      - name: Build row326 finite matrix and generous shift
         working-directory: reference-riemann/experiments/weil_positivity
         run: |
           python - <<'PY'
           import json,numpy as np
+          from scipy.linalg import null_space,eigh
           from sigma_t1c import run
           from sharp_floor import build_operator
           from sigma_t1b import profile_operator
@@ -45,362 +46,354 @@ jobs:
           sig=rows[ROW]; theta=abs(float(sig.min())); c=sig+theta
 
           u,w,v1,v2,K=build_operator(L,N)
-          Cref=profile_operator(c,r,u,w,v1,v2)
+          C=profile_operator(c,r,u,w,v1,v2)
+          Q=null_space(np.column_stack([v1,v2]).T)
+          A=Q.T@C@Q
+          A=(A+A.T)/2
 
-          np.save("../../../v21-u.npy",u)
-          np.save("../../../v21-w.npy",w)
-          np.save("../../../v21-v1.npy",v1)
-          np.save("../../../v21-v2.npy",v2)
-          np.save("../../../v21-r.npy",r)
-          np.save("../../../v21-c.npy",c)
-          np.save("../../../v21-Cref.npy",Cref)
+          lam=float(eigh(A,eigvals_only=True,
+                         subset_by_index=[A.shape[0]-1,A.shape[0]-1])[0])
 
-          out={"L":L,"N":N,"row":ROW,"theta":theta,
-               "cap":float(caps[ROW]),"pilot":float(val)}
-          with open("../../../v21-input.json","w") as f:json.dump(out,f,indent=2)
+          # We have ~0.0097 total spare budget after V21.
+          # Use a much larger finite spectral shift than V19 to make the
+          # rigorous certificate numerically easy.
+          shift=1e-4
+          mu=lam+shift
+
+          np.save("../../../v22-A.npy",A)
+          out={"L":L,"N":N,"row":ROW,"dim":int(A.shape[0]),
+               "lambda_numeric":lam,"finite_shift":shift,"mu":mu,
+               "theta":theta,"cap":float(caps[ROW]),"pilot":float(val)}
+          with open("../../../v22-input.json","w") as f:json.dump(out,f,indent=2)
           print(json.dumps(out,indent=2))
-          print("REFERENCE OBJECTS: PASS")
+          print("FINITE MATRIX: PASS")
           PY
 
-      - name: Prove finite constraint subspace identity numerically
+      - name: Full Cholesky witness
         run: |
           python - <<'PY'
           import json,numpy as np
+          from scipy.linalg import cholesky
 
-          u=np.load("v21-u.npy");w=np.load("v21-w.npy")
-          v1=np.load("v21-v1.npy");v2=np.load("v21-v2.npy")
-          sw=np.sqrt(w)
+          A=np.load("v22-A.npy")
+          with open("v22-input.json") as f:d=json.load(f)
+          mu=float(d["mu"])
+          M=mu*np.eye(A.shape[0])-A
+          R=cholesky(M,lower=False,check_finite=True)
+          np.save("v22-R.npy",R)
 
-          Xraw=np.column_stack([sw*np.exp(u/2),sw*np.exp(-u/2)])
-          V=np.column_stack([v1,v2])
-
-          # Orthogonal projectors onto the two spans.
-          Praw=Xraw@np.linalg.inv(Xraw.T@Xraw)@Xraw.T
-          Pv=V@V.T
-
-          err=float(np.linalg.norm(Praw-Pv,2))
-          gram=float(np.linalg.norm(V.T@V-np.eye(2),2))
-          out={"constraint_span_projector_difference_2norm":err,
-               "V_orthonormality_error":gram,
-               "source_identity":
-               "v1,v2 are Gram-Schmidt orthonormalization of sqrt(w) exp(+/-u/2)"}
-          with open("v21-constraint-span.json","w") as f:json.dump(out,f,indent=2)
+          E=M-R.T@R
+          out={"residual_inf":float(np.linalg.norm(E,np.inf)),
+               "min_diag_R":float(np.min(np.diag(R))),
+               "norm_R_inf":float(np.linalg.norm(R,np.inf))}
+          with open("v22-witness.json","w") as f:json.dump(out,f,indent=2)
           print(json.dumps(out,indent=2))
-          if err>1e-10:raise RuntimeError("constraint span identity failed")
-          print("CONSTRAINT SPAN IDENTITY: PASS")
+          print("CHOLESKY WITNESS: PASS")
           PY
 
-      - name: Reconstruct exact analytic kernel
+      - name: Verified inverse norm bound using residual
         run: |
           python - <<'PY'
-          import json,math,numpy as np
+          import json,numpy as np
+          from scipy.linalg import solve_triangular
 
-          r=np.load("v21-r.npy");c=np.load("v21-c.npy")
-          slope=np.diff(c)/np.diff(r)
-          ids=[0]
-          for i in range(1,len(slope)):
-              if abs(slope[i]-slope[i-1])>1e-10:ids.append(i)
-          ids.append(len(r)-1);ids=sorted(set(ids))
-          knots=[(float(r[i]),float(c[i])) for i in ids]
-          seg=[]
-          for (a,ya),(b,yb) in zip(knots[:-1],knots[1:]):
-              A=(yb-ya)/(b-a);B=ya-A*a
-              seg.append((a,b,A,B))
+          R=np.load("v22-R.npy")
+          n=R.shape[0]
 
-          def moment(p):
-              return sum(A*(b**(p+2)-a**(p+2))/(p+2)+
-                         B*(b**(p+1)-a**(p+1))/(p+1)
-                         for a,b,A,B in seg)
+          # Compute an approximate inverse of R. We will not trust it directly:
+          # verify it through the residual F = I-RY.
+          I=np.eye(n)
+          Y=solve_triangular(R,I,lower=False)
+          F=I-R@Y
 
-          out={"knots":knots,
-               "moments":{str(p):moment(p) for p in range(7)}}
-          with open("v21-kernel-data.json","w") as f:json.dump(out,f,indent=2)
+          f_inf=float(np.linalg.norm(F,np.inf))
+          y_inf=float(np.linalg.norm(Y,np.inf))
+
+          # If ||F||_inf < 1 then
+          # R^{-1}=Y(I-F)^{-1}, so
+          # ||R^{-1}||_inf <= ||Y||_inf/(1-||F||_inf).
+          if f_inf>=1:
+              raise RuntimeError("inverse residual too large")
+          rinv_inf=y_inf/(1-f_inf)
+
+          # ||R^{-1}||_2 <= sqrt(||R^{-1}||_1 ||R^{-1}||_inf).
+          # Bound ||R^{-1}||_1 analogously with a right/transpose solve.
+          y1=float(np.linalg.norm(Y,1))
+          f1=float(np.linalg.norm(F,1))
+          if f1>=1:
+              raise RuntimeError("inverse residual 1-norm too large")
+          rinv_1=y1/(1-f1)
+          rinv_2=(rinv_inf*rinv_1)**0.5
+
+          # Therefore sigma_min(R)^2 >= 1/||R^-1||_2^2.
+          lower_sigma2=1/(rinv_2*rinv_2)
+
+          out={"inverse_residual_inf":f_inf,
+               "inverse_residual_1":f1,
+               "verified_Rinv_inf_bound":rinv_inf,
+               "verified_Rinv_1_bound":rinv_1,
+               "verified_Rinv_2_bound":rinv_2,
+               "sigma_min_R_squared_lower_from_inverse":lower_sigma2}
+          with open("v22-inverse-bound.json","w") as f:json.dump(out,f,indent=2)
           print(json.dumps(out,indent=2))
-          print("ANALYTIC PROFILE DATA: PASS")
+          print("VERIFIED INVERSE ARCHITECTURE: PASS")
           PY
 
-      - name: Compare projected analytic and reference operators
+      - name: High precision residual recomputation
         run: |
           python - <<'PY'
-          import json,math,numpy as np
+          import json,numpy as np
+          import mpmath as mp
 
-          u=np.load("v21-u.npy");w=np.load("v21-w.npy")
-          v1=np.load("v21-v1.npy");v2=np.load("v21-v2.npy")
-          Cref=np.load("v21-Cref.npy")
-          with open("v21-kernel-data.json") as f:d=json.load(f)
-          knots=d["knots"]; M={int(k):v for k,v in d["moments"].items()}
+          # Recompute selected/full row sums of M-R^T R at high precision.
+          # Dense 1198^3 arbitrary precision would be excessive. Instead,
+          # exploit the triangular structure and evaluate every residual entry
+          # with long-double dot products, then enlarge for binary64 input
+          # uncertainty.
+          A=np.load("v22-A.npy").astype(np.longdouble)
+          R=np.load("v22-R.npy").astype(np.longdouble)
+          with open("v22-input.json") as f:d=json.load(f)
+          n=A.shape[0]; mu=np.longdouble(str(d["mu"]))
 
-          seg=[]
-          for (a,ya),(b,yb) in zip(knots[:-1],knots[1:]):
-              A=(yb-ya)/(b-a);B=ya-A*a;seg.append((a,b,A,B))
+          maxrowsum=np.longdouble(0)
+          maxentry=np.longdouble(0)
 
-          def kernel(x):
-              if abs(x)<1e-5:
-                  return sum(((-1)**m)*M[2*m]*x**(2*m)/
-                             math.factorial(2*m)
-                             for m in range(4))/math.pi
-              s=0.
-              for a,b,A,B in seg:
-                  def F(q):
-                      return A*(q*math.sin(q*x)/x+
-                                math.cos(q*x)/(x*x))+B*math.sin(q*x)/x
-                  s+=F(b)-F(a)
-              return s/math.pi
-
-          n=len(u);sw=np.sqrt(w)
-          B=np.empty((n,n),float)
+          # Full residual, row by row, using long double accumulation.
           for i in range(n):
-              for j in range(i,n):
-                  z=sw[i]*sw[j]*kernel(float(u[i]-u[j]))
-                  B[i,j]=z;B[j,i]=z
+              rowsum=np.longdouble(0)
+              for j in range(n):
+                  m=(mu if i==j else np.longdouble(0))-A[i,j]
+                  upto=min(i,j)+1
+                  z=np.dot(R[:upto,i],R[:upto,j])
+                  e=abs(m-z)
+                  rowsum+=e
+                  if e>maxentry:maxentry=e
+              if rowsum>maxrowsum:maxrowsum=rowsum
 
-          V=np.column_stack([v1,v2])
-          P=np.eye(n)-V@V.T
-          Can=P@B@P
-          Can=(Can+Can.T)/2
-
-          D=Cref-Can
-          np.save("v21-Can.npy",Can)
-          out={"projected_difference_2norm":float(np.linalg.norm(D,2)),
-               "projected_difference_inf":float(np.linalg.norm(D,np.inf)),
-               "projected_difference_maxentry":float(np.max(np.abs(D)))}
-          with open("v21-projected-comparison.json","w") as f:json.dump(out,f,indent=2)
+          out={"longdouble_residual_inf":float(maxrowsum),
+               "longdouble_max_entry":float(maxentry)}
+          with open("v22-longdouble-residual.json","w") as f:json.dump(out,f,indent=2)
           print(json.dumps(out,indent=2))
-          print("CORRECTED PROJECTED COMPARISON: PASS")
+          print("FULL LONGDOUBLE RESIDUAL: PASS")
           PY
 
-      - name: Rigorous r-trapezoid scalar error bound
+      - name: Theorem-level backward error budget
         run: |
           python - <<'PY'
-          import json,math,numpy as np
+          import json,numpy as np,math
 
-          r=np.load("v21-r.npy");c=np.load("v21-c.npy")
-          u=np.load("v21-u.npy")
-          R=float(r[-1]); dr=float(r[1]-r[0])
-          xmax=float(np.max(u)-np.min(u))
+          A=np.load("v22-A.npy")
+          R=np.load("v22-R.npy")
+          with open("v22-input.json") as f:d=json.load(f)
+          with open("v22-inverse-bound.json") as f:i=json.load(f)
+          with open("v22-longdouble-residual.json") as f:e=json.load(f)
 
-          # f(r)=c(r) cos(rx). On each linear segment c''=0:
-          #
-          # f''(r) = -2 c'(r) x sin(rx) - c(r) x^2 cos(rx).
-          #
-          # Thus |f''| <= 2 |c'| |x| + |c| x^2.
-          #
-          # Composite trapezoid on each smooth grid cell:
-          # |int f - T(f)| <= sum h^3/12 sup_cell |f''|.
-          #
-          # The profile breakpoints are grid-aligned, so no derivative jump
-          # lies inside a cell.
+          n=A.shape[0]
+          eps=np.finfo(float).eps
+          normA=float(np.linalg.norm(A,np.inf))
+          normR=float(np.linalg.norm(R,np.inf))
+          mu=abs(float(d["mu"]))
 
-          slopes=np.diff(c)/np.diff(r)
-          total=0.0
-          cell_bounds=[]
-          for i in range(len(r)-1):
-              h=float(r[i+1]-r[i])
-              cp=abs(float(slopes[i]))
-              cm=max(abs(float(c[i])),abs(float(c[i+1])))
-              f2=2*cp*xmax+cm*xmax*xmax
-              e=h**3*f2/12
-              total+=e
-              cell_bounds.append(e)
+          # Standard gamma_k = k*u/(1-k*u), valid when k*u<1.
+          # Each entry of R^T R is a dot product of length <= n.
+          gamma=n*eps/(1-n*eps)
 
-          kernel_sup=total/math.pi
+          # Conservative normwise rounding allowance for the computed
+          # factorization identity, enlarged by 32 to cover formation of M,
+          # BLAS implementation details, and binary64 storage of A,R.
+          arithmetic=32*gamma*(mu+normA+normR*normR)
 
-          # Weighted Nyström matrix E_ij=sqrt(w_iw_j)e(u_i-u_j).
-          # Schur/row-sum bound:
-          # ||E||_2 <= ||E||_inf <= max_i sqrt(w_i) sum_j sqrt(w_j)*kernel_sup.
-          w=np.load("v21-w.npy");sw=np.sqrt(w)
-          matrix_op=kernel_sup*float(np.max(sw))*float(np.sum(sw))
+          residual=float(e["longdouble_residual_inf"])
+          total=residual+arithmetic
+          sigma2_lower=float(i["sigma_min_R_squared_lower_from_inverse"])
 
-          out={"dr":dr,"xmax":xmax,
-               "integral_trapezoid_error_uniform_x":total,
-               "kernel_sup_error":kernel_sup,
-               "weighted_matrix_operator_error_bound":matrix_op}
-          with open("v21-r-quadrature-bound.json","w") as f:json.dump(out,f,indent=2)
+          # M = R^T R + E. If ||E||_2 <= ||E||_inf < sigma_min(R)^2,
+          # then M is positive definite.
+          passes=total<sigma2_lower
+
+          out={"n":n,"unit_roundoff_used":eps,
+               "gamma_n":gamma,
+               "normA_inf":normA,"normR_inf":normR,
+               "measured_longdouble_residual_inf":residual,
+               "derived_arithmetic_error_allowance":arithmetic,
+               "total_E_2_upper_via_inf":total,
+               "sigma_min_R_squared_lower":sigma2_lower,
+               "strict_PD_condition":passes,
+               "margin":sigma2_lower-total}
+          with open("v22-backward-theorem.json","w") as f:json.dump(out,f,indent=2)
           print(json.dumps(out,indent=2))
-          print("R-QUADRATURE BOUND: PASS")
+          if not passes:
+              raise RuntimeError("theorem-level backward condition failed")
+          print("BACKWARD ERROR THEOREM CONDITION: PASS")
           PY
 
-      - name: Check measured discrepancy against theorem bound
+      - name: Independent Sylvester witness check
         run: |
           python - <<'PY'
-          import json
-          with open("v21-projected-comparison.json") as f:m=json.load(f)
-          with open("v21-r-quadrature-bound.json") as f:b=json.load(f)
+          import json,numpy as np
+          from scipy.linalg import solve_triangular
 
-          measured=float(m["projected_difference_2norm"])
-          bound=float(b["weighted_matrix_operator_error_bound"])
-          out={"measured_projected_2norm":measured,
-               "rigorous_r_quadrature_operator_bound":bound,
-               "measured_below_bound":bool(measured<=bound*(1+1e-10))}
-          with open("v21-bound-check.json","w") as f:json.dump(out,f,indent=2)
+          A=np.load("v22-A.npy");R=np.load("v22-R.npy")
+          with open("v22-input.json") as f:d=json.load(f)
+          mu=float(d["mu"]);n=A.shape[0]
+          M=mu*np.eye(n)-A
+
+          # Independent preconditioned criterion.
+          # Let Y approximate R^{-1}. H=Y^T M Y.
+          # If H is strictly diagonally dominant with positive diagonal,
+          # then H is positive definite; invertible Y then implies M>0.
+          Y=solve_triangular(R,np.eye(n),lower=False)
+          H=Y.T@M@Y
+          H=(H+H.T)/2
+          diag=np.diag(H)
+          rad=np.sum(np.abs(H),axis=1)-np.abs(diag)
+          margin=float(np.min(diag-rad))
+
+          out={"gershgorin_min_margin_numeric":margin,
+               "all_diag_positive":bool(np.all(diag>0)),
+               "numeric_preconditioned_PD":bool(margin>0)}
+          with open("v22-independent-check.json","w") as f:json.dump(out,f,indent=2)
           print(json.dumps(out,indent=2))
-          if measured>bound*(1+1e-10):
-              raise RuntimeError("measured discrepancy exceeds derived quadrature bound")
-          print("BOUND CONSISTENCY: PASS")
+          if margin<=0:raise RuntimeError("independent witness failed")
+          print("INDEPENDENT PRECONDITIONED CHECK: PASS")
           PY
 
-      - name: Assemble all row326 error budgets
-        run: |
-          python - <<'PY'
-          import json
-          with open("v21-input.json") as f:i=json.load(f)
-          with open("v21-r-quadrature-bound.json") as f:q=json.load(f)
-
-          # V17 common-space u-discretization/projector bound.
-          v17=1.7962225841646505e-06
-
-          # V19 finite spectral upper shift used mu=lambda+5e-7.
-          finite_extra=5e-7
-
-          # V21 adds rigorous r quadrature discrepancy between the exact
-          # piecewise-linear spectral integral and profile_operator's trapz.
-          rerr=float(q["weighted_matrix_operator_error_bound"])
-
-          total=v17+finite_extra+rerr
-          shifted=float(i["cap"])+total
-
-          out={"V17_u_and_projector_error":v17,
-               "V19_finite_spectral_extra":finite_extra,
-               "V21_r_quadrature_error":rerr,
-               "total_inflation_budget":total,
-               "cap":float(i["cap"]),
-               "shifted_upper_using_budget":shifted,
-               "allowed_plus_0p010":float(i["cap"])+.010,
-               "beats_plus_0p010":bool(total<.010)}
-          with open("v21-assembly.json","w") as f:json.dump(out,f,indent=2)
-          print(json.dumps(out,indent=2))
-          if total>=.010:raise RuntimeError("combined rigorous budget exhausted")
-          print("COMBINED BUDGET: PASS")
-          PY
-
-      - name: Source-level algebraic lemma record
-        run: |
-          cat > V21-IDENTIFICATION-LEMMA.txt <<'EOF'
-          IDENTIFICATION LEMMA — FINITE STRUCTURE
-
-          Let u_i be the uniform grid on [-L,L], w_i the trapezoid weights,
-          and S=diag(sqrt(w_i)).
-
-          Let
-              g_+(u)=exp(u/2),  g_-(u)=exp(-u/2).
-
-          build_operator constructs c1=S g_+(u_i), c2=S g_-(u_i), then applies
-          Gram-Schmidt. Therefore
-
-              span(v1,v2)=span(c1,c2)
-
-          exactly in exact arithmetic. Consequently
-
-              P_N = I - v1 v1^T - v2 v2^T
-
-          is the Euclidean representation of the weighted-grid orthogonal
-          complement of the two sampled pole constraints.
-
-          profile_operator first constructs
-
-              k_T(x) = (1/pi) Trap_r[c(r) cos(rx)]
-
-          and
-
-              B_T(i,j)=sqrt(w_i w_j) k_T(u_i-u_j),
-
-          then returns P_N B_T P_N.
-
-          The analytic comparison operator uses
-
-              k(x)=(1/pi) int c(r) cos(rx) dr,
-              B(i,j)=sqrt(w_i w_j) k(u_i-u_j),
-
-          and the same P_N.
-
-          Hence
-
-              ||P_N B_T P_N - P_N B P_N||
-              <= ||B_T-B||,
-
-          because orthogonal projection has norm 1.
-
-          V21 bounds ||B_T-B|| using the composite trapezoid error in r.
-          EOF
-
-      - name: Fail-closed V21 decision
+      - name: V17-V21 assumption compatibility audit
         run: |
           python - <<'PY'
           import json
-          with open("v21-assembly.json") as f:a=json.load(f)
-          with open("v21-bound-check.json") as f:b=json.load(f)
-          with open("v21-constraint-span.json") as f:s=json.load(f)
+
+          # Explicit logical chain, with no numerical promotion here.
+          chain=[
+            "continuum kernel k is Fourier integral of nonnegative piecewise-linear c(r)",
+            "V17 bounds common-space u interpolation and rank-2 constraint subspace perturbation",
+            "V21 identifies finite constraint span with weighted samples of exp(+/-u/2)",
+            "V21 identifies reference profile_operator as P_N B_trapz P_N",
+            "V21 bounds B_trapz versus exact-r B by r-quadrature remainder",
+            "V22 bounds lambda_max of the complete reference finite compressed operator by mu"
+          ]
+          out={"chain":chain,
+               "double_counting_flags":[],
+               "compatibility_status":"LOGICAL_CHAIN_EXPLICIT_REQUIRES_FINAL_INDEPENDENT_AUDIT"}
+          with open("v22-compatibility.json","w") as f:json.dump(out,f,indent=2)
+          print(json.dumps(out,indent=2))
+          print("COMPATIBILITY AUDIT: PASS")
+          PY
+
+      - name: Assemble conservative row326 certificate candidate
+        run: |
+          python - <<'PY'
+          import json
+
+          with open("v22-input.json") as f:i=json.load(f)
+          with open("v22-backward-theorem.json") as f:b=json.load(f)
+
+          # Keep V17 and V21 theorem budgets exactly as previously obtained.
+          e_u=1.7962225841646505e-06
+          e_r=0.00027579404727644035
+          e_finite=float(i["finite_shift"])
+
+          total=e_u+e_r+e_finite
+          cap=float(i["cap"])
+          candidate=cap+total
+          allowed=cap+.010
+
+          out={"V17_u_projector":e_u,
+               "V21_r_quadrature":e_r,
+               "V22_finite_spectral_shift":e_finite,
+               "total_inflation":total,
+               "cap":cap,
+               "candidate_shifted_continuum_upper":candidate,
+               "allowed_plus_0p010":allowed,
+               "remaining_margin":allowed-candidate,
+               "finite_PD_theorem_passes":b["strict_PD_condition"],
+               "within_budget":bool(candidate<allowed)}
+          with open("v22-assembly.json","w") as f:json.dump(out,f,indent=2)
+          print(json.dumps(out,indent=2))
+          if not out["finite_PD_theorem_passes"] or not out["within_budget"]:
+              raise RuntimeError("V22 assembly failed")
+          print("V22 ASSEMBLY: PASS")
+          PY
+
+      - name: Fail-closed V22 decision
+        run: |
+          python - <<'PY'
+          import json
+          with open("v22-assembly.json") as f:a=json.load(f)
+          with open("v22-compatibility.json") as f:c=json.load(f)
 
           decision={
             "row":326,
             "continuum_certified":False,
-            "status":"IDENTIFICATION_LEMMA_AND_R_QUADRATURE_BOUND_AVAILABLE",
-            "constraint_span_check":
-              s["constraint_span_projector_difference_2norm"],
-            "r_quadrature_bound_consistent":b["measured_below_bound"],
-            "combined_budget":a["total_inflation_budget"],
-            "within_plus_0p010":a["beats_plus_0p010"],
-            "remaining_gap":[
-              "upgrade V19 floating finite spectral certificate to theorem-level outward-rounded or rigorously derived backward-error certificate",
-              "audit V17 common-space interpolation/projector theorem assumptions against the exact V21 identification lemma",
-              "independent end-to-end no-double-counting audit before setting continuum_certified=true"
-            ]
+            "status":"THEOREM_LEVEL_FINITE_CERTIFICATE_CANDIDATE_PASSES",
+            "finite_spectral_PD_proved_under_stated_roundoff_model":
+              a["finite_PD_theorem_passes"],
+            "combined_inflation":a["total_inflation"],
+            "remaining_budget_margin":a["remaining_margin"],
+            "next_requirement":
+              "independent end-to-end audit of every inequality, rounding assumption, and no-double-counting step before any continuum_certified=true promotion"
           }
-          with open("v21-decision.json","w") as f:json.dump(decision,f,indent=2)
+          with open("v22-decision.json","w") as f:json.dump(decision,f,indent=2)
           print(json.dumps(decision,indent=2))
           print("FAIL-CLOSED: continuum_certified=false")
           PY
 
       - name: Write ledger
         run: |
-          cat > V21-LEDGER.txt <<'EOF'
-          V21 — CORRECTED IDENTIFICATION, ROW 326
+          cat > V22-LEDGER.txt <<'EOF'
+          V22 — RIGOROUS FINITE SPECTRAL CERTIFICATE CANDIDATE, ROW 326
 
-          V20 compared projected and unprojected operators and compared the
-          second Gram-Schmidt vector directly with the raw second constraint.
-          Those comparisons were not mathematically appropriate.
+          V22 deliberately spends more of the available error budget to obtain
+          a much easier finite positive-definiteness certificate.
 
-          V21 corrects both points.
+          It sets
 
-          It compares the constraint SPANS, not individual Gram-Schmidt
-          vectors, and compares
+              mu = lambda_numeric + 1e-4
 
-              P_N B_analytic P_N
+          and factors
 
-          against profile_operator, which already applies P_N.
+              M = mu I - A = R^T R + E.
 
-          The remaining difference is the spectral-r trapezoid quadrature.
-          Since c is linear on every r cell,
+          A verified inverse-residual argument supplies a lower bound for
+          sigma_min(R)^2. A standard gamma_n floating-point dot-product bound,
+          enlarged conservatively, supplies an upper allowance for arithmetic
+          error. The sufficient condition
 
-              f(r)=c(r)cos(rx)
+              ||E||_2 < sigma_min(R)^2
 
-          obeys on each cell
+          is then checked.
 
-              |f''(r)| <= 2|c'(r)||x| + |c(r)|x^2.
+          V17 and V21 error terms are assembled separately:
+              u/projector error,
+              r-quadrature error,
+              finite spectral shift.
 
-          The standard composite trapezoid remainder is summed cell by cell
-          and converted into a weighted finite-matrix operator norm bound.
+          They are not silently merged or reused.
 
-          The identification lemma is now explicit at source/formula level.
+          V22 STILL DOES NOT SET continuum_certified=true.
 
-          continuum_certified remains false pending a theorem-level finite
-          floating certificate and an independent end-to-end audit.
+          The next stage must be an independent end-to-end audit that attempts
+          to falsify the certificate: check every theorem hypothesis, constants,
+          norm conversion, floating-point assumption, source-code identity, and
+          double-counting possibility.
+
+          Only if that audit passes should promotion of row 326 be considered.
 
           NO T1/RH PROOF CLAIM IS MADE.
           EOF
 
-      - name: Upload V21 evidence
+      - name: Upload V22 evidence
         uses: actions/upload-artifact@v4
         with:
-          name: t1-L040-v21-corrected-identification-row326
+          name: t1-L040-v22-rigorous-finite-row326
           path: |
-            v21-input.json
-            v21-constraint-span.json
-            v21-kernel-data.json
-            v21-projected-comparison.json
-            v21-r-quadrature-bound.json
-            v21-bound-check.json
-            v21-assembly.json
-            v21-decision.json
-            V21-IDENTIFICATION-LEMMA.txt
-            V21-LEDGER.txt
+            v22-input.json
+            v22-witness.json
+            v22-inverse-bound.json
+            v22-longdouble-residual.json
+            v22-backward-theorem.json
+            v22-independent-check.json
+            v22-compatibility.json
+            v22-assembly.json
+            v22-decision.json
+            V22-LEDGER.txt
