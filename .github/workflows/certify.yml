@@ -1,4 +1,4 @@
-name: T1 L040 V26 Batch Audit Active Caps
+name: T1 L040 V26.1 Batch Audit Active Caps
 
 on:
   workflow_dispatch:
@@ -112,8 +112,8 @@ jobs:
                       A=Kab-th*(P-Kw)
                       add(sab-th*(1.-wab),float(np.max(eigsh(A,k=6,which="LA",return_eigenvectors=False))),
                           "signed_joint",f"r{rd}_joint_th{th:g}")
-              v2,x2=solve();stalls=stalls+1 if abs(v2-val)<1e-4 else 0
-              val,x=v2,x2
+              val2,x2=solve();stalls=stalls+1 if abs(val2-val)<1e-4 else 0
+              val,x=val2,x2
               if stalls>=3 or val>=.03:break
 
           if len(rows)!=397:raise RuntimeError(f"dictionary drift {len(rows)}")
@@ -210,7 +210,6 @@ jobs:
       - name: Write ledger
         run: |
           cat > V26-LEDGER.txt <<'EOF'
-          V26 — BATCH AUDIT OF THE 40 ACTIVE CAPS
+          V26.1 — BATCH AUDIT OF THE 40 ACTIVE CAPS
 
-          V26 rebuilds the complete 397-row dictionary from the pinned source,
-        
+          V26.1 rebuilds the complete 397-row dictionary from the pinned sour
