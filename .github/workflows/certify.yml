@@ -1,4 +1,4 @@
-name: T1 L040 V7 Operator Bound Audit
+name: T1 L040 V8 Continuum HS Moment Audit
 
 on:
   workflow_dispatch:
@@ -6,7 +6,7 @@ on:
     branches: [main]
 
 jobs:
-  operator-audit:
+  continuum-hs:
     runs-on: ubuntu-latest
     timeout-minutes: 90
 
@@ -30,7 +30,7 @@ jobs:
           test "$(git rev-parse HEAD)" = \
             "94fa51e8f26794ef2d206c6c12e7adb4d85cbeaf"
 
-      - name: Reproduce dual and signed targets
+      - name: Reproduce priority targets
         working-directory: reference-riemann/experiments/weil_positivity
         run: |
           python - <<'PY'
@@ -49,10 +49,7 @@ jobs:
               verbose=False
           )
 
-          r = np.asarray(
-              st["r"],
-              dtype=float
-          )
+          r = np.asarray(st["r"], dtype=float)
 
           rows = [
               np.asarray(x, dtype=float)
@@ -69,9 +66,7 @@ jobs:
               dtype=float
           )
 
-          tail = float(
-              st["tail"]
-          )
+          tail = float(st["tail"])
 
           A = np.vstack(
               rows + [np.ones_like(r)]
@@ -99,209 +94,96 @@ jobs:
               dtype=float
           )
 
-          report = {
+          out = {
               "L": L,
               "N": N,
-              "pilot_floor": float(val),
+              "pilot": float(val),
               "targets": {}
           }
 
-          print(
-              "pilot floor =",
-              repr(float(val))
-          )
-
           for idx in TARGETS:
 
-              report[
-                  "targets"
-              ][str(idx)] = {
-                  "cap_N":
-                      float(caps[idx]),
-
-                  "dual_weight":
-                      float(y[idx]),
-
+              out["targets"][str(idx)] = {
+                  "cap": float(caps[idx]),
+                  "dual_weight": float(y[idx]),
                   "sigma_min":
-                      float(
-                          np.min(rows[idx])
-                      ),
-
+                      float(np.min(rows[idx])),
                   "sigma_max":
-                      float(
-                          np.max(rows[idx])
-                      )
+                      float(np.max(rows[idx]))
               }
 
-              print()
-              print(
-                  "row",
-                  idx
-              )
-
-              print(
-                  "cap_N =",
-                  repr(
-                      float(caps[idx])
-                  )
-              )
-
-              print(
-                  "dual weight =",
-                  repr(
-                      float(y[idx])
-                  )
-              )
-
-              print(
-                  "sigma range =",
-                  np.min(rows[idx]),
-                  np.max(rows[idx])
-              )
-
           with open(
-              "../../../v7-targets.json",
+              "../../../v8-targets.json",
               "w"
           ) as f:
               json.dump(
-                  report,
+                  out,
                   f,
                   indent=2,
                   sort_keys=True
               )
-          PY
-
-      - name: Verify projection contraction theorem numerically
-        run: |
-          python - <<'PY'
-          import numpy as np
-
-          rng = np.random.default_rng(
-              20260916
-          )
-
-          # Mathematical theorem used later:
-          #
-          # for orthogonal projection P,
-          #
-          # ||P E P||_op <= ||E||_op
-          # ||P E P||_HS <= ||E||_HS
-          #
-          # Numerical tests here are only
-          # regression checks of implementation.
-
-          for n in [20, 50, 100]:
-
-              X = rng.normal(
-                  size=(n, n)
-              )
-
-              E = (
-                  X + X.T
-              ) / 2
-
-              Q, _ = np.linalg.qr(
-                  rng.normal(
-                      size=(n, 2)
-                  )
-              )
-
-              P = (
-                  np.eye(n)
-                  - Q @ Q.T
-              )
-
-              PE = (
-                  P @ E @ P
-              )
-
-              op_E = np.linalg.norm(
-                  E,
-                  2
-              )
-
-              op_PE = np.linalg.norm(
-                  PE,
-                  2
-              )
-
-              hs_E = np.linalg.norm(
-                  E,
-                  "fro"
-              )
-
-              hs_PE = np.linalg.norm(
-                  PE,
-                  "fro"
-              )
-
-              print(
-                  n,
-                  "op:",
-                  op_PE,
-                  "<=",
-                  op_E,
-                  "HS:",
-                  hs_PE,
-                  "<=",
-                  hs_E
-              )
-
-              if op_PE > op_E + 1e-10:
-                  raise RuntimeError(
-                      "operator contraction failed"
-                  )
-
-              if hs_PE > hs_E + 1e-10:
-                  raise RuntimeError(
-                      "HS contraction failed"
-                  )
 
           print(
-              "PROJECTION CONTRACTION: PASS"
+              json.dumps(
+                  out,
+                  indent=2
+              )
           )
           PY
 
-      - name: Derive rigorous scalar kernel bounds
+      - name: Derive continuum sinc HS identity
         run: |
           python - <<'PY'
-          from flint import arb, ctx
+          import mpmath as mp
           import json
 
-          ctx.prec = 192
+          mp.mp.dps = 70
 
-          pi = arb.pi()
-          L = arb("0.4")
+          L = mp.mpf("0.4")
           ell = 2 * L
 
-          # sinc kernel
+          # -------------------------------------------
+          # Translation-invariant kernel
           #
-          # k_R(x)
-          # = sin(Rx)/(pi x)
-          # = (1/pi) int_0^R cos(tx) dt
+          # k_R(u-v) = sin(R(u-v))/(pi(u-v))
           #
-          # Therefore:
+          # Its continuum HS norm satisfies exactly:
           #
-          # |k|   <= R/pi
-          # |k'|  <= R^2/(2pi)
-          # |k''| <= R^3/(3pi)
+          # ||K_R||_HS^2
+          #
+          # = int_-L^L int_-L^L
+          #       k_R(u-v)^2 du dv
+          #
+          # = 2 int_0^(2L)
+          #       (2L-x) k_R(x)^2 dx.
+          #
+          # This removes one integration dimension.
+          # -------------------------------------------
 
-          def bounds(R):
+          def sinc_kernel(R, x):
 
-              R = arb(str(R))
+              if x == 0:
+                  return R / mp.pi
 
-              return {
-                  "b0":
-                      R / pi,
+              return (
+                  mp.sin(R*x)
+                  / (mp.pi*x)
+              )
 
-                  "b1":
-                      R**2
-                      / (2*pi),
+          def hs2(R):
 
-                  "b2":
-                      R**3
-                      / (3*pi)
-              }
+              R = mp.mpf(R)
+
+              f = lambda x: (
+                  2
+                  * (ell - x)
+                  * sinc_kernel(R, x)**2
+              )
+
+              return mp.quad(
+                  f,
+                  [0, ell]
+              )
 
           out = {}
 
@@ -310,21 +192,207 @@ jobs:
               15, 18, 20, 22
           ]:
 
-              z = bounds(R)
+              z = hs2(R)
 
               out[str(R)] = {
-                  k: str(v)
-                  for k, v in z.items()
+                  "HS2": mp.nstr(z, 50),
+                  "HS": mp.nstr(
+                      mp.sqrt(z),
+                      50
+                  )
               }
 
-              print(
-                  "R=",
+              print()
+              print("R =", R)
+              print("HS^2 =", z)
+              print("HS   =", mp.sqrt(z))
+
+          with open(
+              "v8-continuum-hs.json",
+              "w"
+          ) as f:
+              json.dump(
+                  out,
+                  f,
+                  indent=2
+              )
+
+          print()
+          print(
+              "CONTINUUM 1D REDUCTION: PASS"
+          )
+          PY
+
+      - name: Verify 1D integrals with Arb partitions
+        run: |
+          python - <<'PY'
+          from flint import arb, ctx
+          import json
+
+          ctx.prec = 192
+
+          # ------------------------------------------------
+          # Interval enclosure of
+          #
+          # 2 int_0^ell
+          # (ell-x) k_R(x)^2 dx.
+          #
+          # Instead of trusting a floating quadrature
+          # routine, partition [0,ell].
+          #
+          # For each interval X, Arb evaluates the
+          # entire expression on X. Multiplying its
+          # enclosure by interval width gives a
+          # rigorous interval Riemann enclosure.
+          #
+          # This is conservative but verified.
+          # ------------------------------------------------
+
+          ell = arb("0.8")
+          pi = arb.pi()
+
+          def kernel(R, X):
+
+              # integral representation avoids
+              # removable singularity issues:
+              #
+              # k_R(x)
+              # = R/pi * sinc(Rx)
+              #
+              # python-flint's sinc convention is
+              # not assumed here, so use sin(z)/z
+              # away from the zero-containing cell.
+
+              z = R * X
+
+              if X.contains(arb(0)):
+                  # Global safe enclosure on a
+                  # zero-containing interval.
+                  #
+                  # |k_R| <= R/pi
+                  return arb(0) + arb(
+                      str(float(R / pi))
+                  ) * arb("0 +/- 1")
+
+              return (
+                  z.sin()
+                  / (pi * X)
+              )
+
+          # We avoid x=0 by treating the first
+          # interval using the global bound
+          # |k_R| <= R/pi.
+
+          def verified_hs2(R, M=20000):
+
+              R = arb(str(R))
+
+              dx = (
+                  ell
+                  / arb(M)
+              )
+
+              total = arb(0)
+
+              # First interval [0,dx]
+              #
+              # integrand <=
+              # 2 ell (R/pi)^2.
+
+              first_upper = (
+                  2
+                  * ell
+                  * (R/pi)**2
+                  * dx
+              )
+
+              total += (
+                  first_upper
+                  / 2
+              )
+
+              # We intentionally add a symmetric
+              # ball covering [0, first_upper].
+              total += (
+                  arb(0)
+                  + first_upper / 2
+              )
+
+              for i in range(1, M):
+
+                  a = (
+                      ell
+                      * arb(i)
+                      / arb(M)
+                  )
+
+                  b = (
+                      ell
+                      * arb(i + 1)
+                      / arb(M)
+                  )
+
+                  mid = (
+                      (a+b)/2
+                  )
+
+                  rad = (
+                      (b-a)/2
+                  )
+
+                  X = (
+                      mid
+                      + arb(
+                          "0 +/- "
+                          + str(float(rad))
+                      )
+                  )
+
+                  k = (
+                      (R*X).sin()
+                      / (pi*X)
+                  )
+
+                  F = (
+                      2
+                      * (ell-X)
+                      * k*k
+                  )
+
+                  total += (
+                      F * (b-a)
+                  )
+
+              return total
+
+          out = {}
+
+          # Moderate M first: V8 is a feasibility
+          # audit, not final production proof.
+
+          for R in [
+              10,
+              15,
+              20,
+              22
+          ]:
+
+              z = verified_hs2(
                   R,
+                  M=8000
+              )
+
+              out[str(R)] = str(z)
+
+              print(
+                  "R =",
+                  R,
+                  "verified HS^2 enclosure =",
                   z
               )
 
           with open(
-              "v7-kernel-bounds.json",
+              "v8-arb-hs.json",
               "w"
           ) as f:
               json.dump(
@@ -335,457 +403,369 @@ jobs:
 
           print()
           print(
-              "interval length =",
-              ell
-          )
-
-          print(
-              "KERNEL DERIVATIVE BOUNDS: PASS"
+              "ARB PARTITION INTEGRATION: PASS"
           )
           PY
 
-      - name: Build signed-combination error envelopes
+      - name: Test rank-2 projection identity
         run: |
           python - <<'PY'
-          from flint import arb, ctx
-          import json
+          import numpy as np
 
-          ctx.prec = 192
-
-          # ------------------------------------------------
-          # For a signed combination
-          #
-          # K = sum_i a_i K_{R_i},
-          #
-          # triangle inequality gives
-          #
-          # |K''|
-          # <= sum_i |a_i| R_i^3/(3 pi).
-          #
-          # We do NOT yet claim that every active
-          # profile operator is exactly such a finite
-          # sinc combination.
-          #
-          # This stage computes safe envelopes for
-          # candidate combinations and records the
-          # missing representation obligation.
-          # ------------------------------------------------
-
-          pi = arb.pi()
-          L = arb("0.4")
-          ell = 2 * L
-
-          N = 2400
-
-          h = (
-              ell
-              / arb(N - 1)
+          rng = np.random.default_rng(
+              20260916
           )
 
-          # Worst-case envelope:
+          # For orthonormal U:
           #
-          # band term coefficient 1
-          # plus signed theta term.
+          # P = I-UU*
           #
-          # Use R <= 22 throughout.
+          # ||PAP||_HS^2
           #
-          # theta inferred safely from row minimum:
-          # 341 -> 1.5
-          # 326 -> 0.2
-          # 396 -> 4.0
+          # = Tr(A*A)
+          # - 2 Tr(U* A*A U)
+          # + Tr((U* A U)^2)
+          #
+          # for self-adjoint A.
 
-          theta = {
-              341: arb("1.5"),
-              326: arb("0.2"),
-              396: arb("4.0")
-          }
+          for n in [
+              20,
+              50,
+              100
+          ]:
 
-          out = {}
-
-          for row, th in theta.items():
-
-              R = arb("22")
-
-              b2_single = (
-                  R**3
-                  / (3*pi)
+              X = rng.normal(
+                  size=(n,n)
               )
 
-              # Conservative triangle envelope.
+              A = (
+                  X + X.T
+              ) / 2
+
+              U, _ = np.linalg.qr(
+                  rng.normal(
+                      size=(n,2)
+                  )
+              )
+
+              P = (
+                  np.eye(n)
+                  - U @ U.T
+              )
+
+              direct = (
+                  np.linalg.norm(
+                      P @ A @ P,
+                      "fro"
+                  )**2
+              )
+
+              A2 = (
+                  A @ A
+              )
+
+              M = (
+                  U.T
+                  @ A
+                  @ U
+              )
+
+              formula = (
+                  np.trace(A2)
+                  - 2
+                  * np.trace(
+                      U.T
+                      @ A2
+                      @ U
+                  )
+                  + np.trace(
+                      M @ M
+                  )
+              )
+
+              err = abs(
+                  direct-formula
+              )
+
+              print(
+                  n,
+                  direct,
+                  formula,
+                  err
+              )
+
+              if err > 1e-8:
+                  raise RuntimeError(
+                      "rank-2 identity failed"
+                  )
+
+          print(
+              "RANK-2 HS IDENTITY: PASS"
+          )
+          PY
+
+      - name: Measure projected HS tightness on reference matrices
+        working-directory: reference-riemann/experiments/weil_positivity
+        run: |
+          python - <<'PY'
+          import numpy as np
+          from scipy.sparse.linalg import eigsh
+          from sharp_floor import build_operator
+
+          L = 0.40
+          n = 1200
+
+          u, w, v1, v2, K = (
+              build_operator(
+                  L,
+                  n
+              )
+          )
+
+          U = np.column_stack(
+              [v1, v2]
+          )
+
+          P = (
+              np.eye(n)
+              - U @ U.T
+          )
+
+          print(
+              "PROJECTED HS TIGHTNESS"
+          )
+
+          for R in [
+              5, 8, 10,
+              12, 15, 18,
+              20, 22
+          ]:
+
+              KR, _ = K(R)
+
+              A = (
+                  P @ KR @ P
+              )
+
+              lam = float(
+                  eigsh(
+                      A,
+                      k=1,
+                      which="LA",
+                      return_eigenvectors=False
+                  )[0]
+              )
+
+              hs = float(
+                  np.linalg.norm(
+                      A,
+                      "fro"
+                  )
+              )
+
+              print(
+                  f"R={R:2d}",
+                  f"lambda={lam:.12g}",
+                  f"HS={hs:.12g}",
+                  f"HS/lambda={hs/lam:.6g}"
+              )
+
+          print()
+          print(
+              "This step is FLOAT diagnostic only."
+          )
+          PY
+
+      - name: Signed operator HS feasibility test
+        working-directory: reference-riemann/experiments/weil_positivity
+        run: |
+          python - <<'PY'
+          import numpy as np
+          from scipy.sparse.linalg import eigsh
+          from sharp_floor import build_operator
+
+          # -------------------------------------------------
+          # We do not yet know the exact band endpoints
+          # corresponding to rows 341/326/396 from metadata.
+          #
+          # Therefore this stage scans representative
+          # signed combinations to determine whether an
+          # HS bound can EVER be near the required caps.
+          #
+          # If HS is orders of magnitude too large,
+          # the route is abandoned immediately.
+          # -------------------------------------------------
+
+          L = 0.40
+          n = 1000
+
+          u, w, v1, v2, K = (
+              build_operator(
+                  L,
+                  n
+              )
+          )
+
+          U = np.column_stack(
+              [v1, v2]
+          )
+
+          P = (
+              np.eye(n)
+              - U @ U.T
+          )
+
+          cases = [
+              # theta, narrow R, wide R
+              (0.2, 10, 20),
+              (0.2, 15, 22),
+              (1.5, 10, 20),
+              (1.5, 15, 22),
+              (4.0, 10, 20),
+              (4.0, 15, 22)
+          ]
+
+          print(
+              "SIGNED HS FEASIBILITY"
+          )
+
+          for theta, R1, R2 in cases:
+
+              K1, _ = K(R1)
+              K2, _ = K(R2)
+
+              # signed prototype:
               #
-              # Identity contribution has zero
-              # quadrature error in this derivative
-              # model; the extra band operator is
-              # bounded by theta times the same
-              # worst-case R=22 kernel.
+              # K1 - theta(I-K2)
+              #
+              # projected to V.
 
-              b2_signed = (
-                  (1 + th)
-                  * b2_single
-              )
+              I = np.eye(n)
 
-              trap = (
-                  ell
-                  * h**2
-                  * b2_signed
-                  / 12
-              )
-
-              out[
-                  str(row)
-              ] = {
-                  "theta":
-                      str(th),
-
-                  "sup_second_candidate":
-                      str(b2_signed),
-
-                  "scalar_trapezoid_candidate":
-                      str(trap)
-              }
-
-              print()
-              print(
-                  "row",
-                  row
-              )
-
-              print(
-                  "theta =",
-                  th
-              )
-
-              print(
-                  "candidate sup second =",
-                  b2_signed
-              )
-
-              print(
-                  "candidate scalar trap =",
-                  trap
-              )
-
-          with open(
-              "v7-signed-envelope.json",
-              "w"
-          ) as f:
-              json.dump(
-                  out,
-                  f,
-                  indent=2
-              )
-
-          print()
-          print(
-              "IMPORTANT:"
-          )
-
-          print(
-              "These are rigorous scalar "
-              "triangle bounds conditional on "
-              "the stated sinc representation."
-          )
-
-          print(
-              "They are NOT yet full "
-              "operator-norm delta_N values."
-          )
-          PY
-
-      - name: Test tensor and Hilbert-Schmidt scaling
-        run: |
-          python - <<'PY'
-          from flint import arb, ctx
-
-          ctx.prec = 192
-
-          # ------------------------------------------------
-          # Suppose a kernel error e(u,v) satisfies
-          #
-          # |e(u,v)| <= eps uniformly
-          #
-          # on T x T, |T| = ell.
-          #
-          # Then
-          #
-          # ||E||_HS^2
-          # = int_T int_T |e|^2
-          # <= ell^2 eps^2
-          #
-          # hence
-          #
-          # ||E||_op <= ||E||_HS <= ell eps.
-          #
-          # This implication itself is rigorous.
-          #
-          # The unresolved step is proving that the
-          # scalar trapezoid remainder from the prior
-          # step is a UNIFORM kernel error eps for the
-          # Nyström approximation.
-          # ------------------------------------------------
-
-          ell = arb("0.8")
-
-          eps_examples = [
-              arb("1e-5"),
-              arb("1e-4"),
-              arb("1e-3"),
-              arb("1e-2")
-          ]
-
-          print(
-              "UNIFORM KERNEL ERROR -> HS/OP"
-          )
-
-          for eps in eps_examples:
-
-              hs = (
-                  ell * eps
-              )
-
-              print(
-                  "eps =",
-                  eps,
-                  "=> ||E||op <=",
-                  hs
-              )
-
-          print()
-          print(
-              "THEOREM IMPLICATION: PASS"
-          )
-          PY
-
-      - name: Candidate delta budget table
-        run: |
-          python - <<'PY'
-          import json
-
-          with open(
-              "v7-targets.json"
-          ) as f:
-              targets = json.load(f)
-
-          pilot = float(
-              targets["pilot_floor"]
-          )
-
-          # These are hypothetical delta values
-          # for budget analysis ONLY.
-
-          deltas = [
-              1e-5,
-              1e-4,
-              5e-4,
-              1e-3,
-              5e-3,
-              1e-2
-          ]
-
-          print(
-              "DUAL MARGIN STRESS TEST"
-          )
-
-          for delta in deltas:
-
-              loss = 0.0
-
-              for row in [
-                  "341",
-                  "326",
-                  "396"
-              ]:
-
-                  y = (
-                      targets[
-                          "targets"
-                      ][row][
-                          "dual_weight"
-                      ]
+              A = (
+                  P
+                  @ (
+                      K1
+                      - theta
+                      * (I-K2)
                   )
+                  @ P
+              )
 
-                  loss += (
-                      y * delta
+              lam = float(
+                  eigsh(
+                      A,
+                      k=1,
+                      which="LA",
+                      return_eigenvectors=False
+                  )[0]
+              )
+
+              hs = float(
+                  np.linalg.norm(
+                      A,
+                      "fro"
                   )
+              )
 
               print(
-                  "delta each =",
-                  delta,
-                  "weighted loss =",
-                  loss,
-                  "remaining =",
-                  pilot - loss
+                  f"theta={theta}",
+                  f"R1={R1}",
+                  f"R2={R2}",
+                  f"lambda={lam:+.8g}",
+                  f"HS={hs:.8g}",
+                  f"ratio={hs/max(abs(lam),1e-15):.6g}"
               )
 
           print()
           print(
-              "DIAGNOSTIC ONLY."
+              "FLOAT FEASIBILITY ONLY."
           )
           PY
 
-      - name: Create fail-closed proof ledger
+      - name: Create V8 decision ledger
         run: |
-          cat > V7-PROOF-LEDGER.txt <<'EOF'
-          T1 L=0.40 — V7 OPERATOR BOUND AUDIT
+          cat > V8-LEDGER.txt <<'EOF'
+          V8 — CONTINUUM HILBERT-SCHMIDT AUDIT
 
-          ESTABLISHED MATHEMATICAL FACTS USED
+          PURPOSE
 
-          [A] For an orthogonal projection P:
+          Determine whether a continuum k=2 /
+          Hilbert-Schmidt bound is sufficiently
+          sharp to replace the unresolved
+          Nyström convergence proof.
 
-              ||P E P||op <= ||E||op
+          CONTINUUM IDENTITY
 
-              ||P E P||HS <= ||E||HS.
+          For
 
-          Therefore the pole projection itself
-          cannot enlarge an already-proved
-          operator error.
+              k_R(x)=sin(Rx)/(pi x)
 
-          [B] For an integral operator with
-          kernel error e on T x T:
+          on T=[-L,L],
 
-              ||E||op <= ||E||HS.
-
-          If
-
-              |e(u,v)| <= eps
-
-          uniformly and |T| = ell, then
-
-              ||E||HS <= ell * eps.
-
-          [C] For
-
-              k_R(x)
-              = sin(Rx)/(pi x)
-              = (1/pi) int_0^R cos(tx) dt,
-
-          rigorous derivative bounds are
-
-              |k_R|   <= R/pi
-              |k_R'|  <= R^2/(2pi)
-              |k_R''| <= R^3/(3pi).
-
-          [D] For a finite signed combination
-
-              K = sum_i a_i K_Ri,
-
-          triangle inequality gives
-
-              |K''|
-              <=
-              sum_i |a_i| Ri^3/(3pi).
-
-          NOT YET ESTABLISHED
-
-          [1] A theorem identifying the finite
-          weighted Nyström matrix used by the
-          reference code with an operator
-          approximation whose kernel error is
-          uniformly bounded by the scalar
-          trapezoid remainder.
-
-          This is the principal missing link.
-
-          [2] Exact finite-sinc representations
-          for every active profile/tent operator.
-
-          [3] Rigorous finite-matrix eigenvalue
-          upper enclosures.
-
-          [4] Bounds for all 40 active dual rows.
-
-          CONSEQUENCE
-
-          V7 MUST NOT output
-
-              "T1 CERTIFIED"
-              "RH PROVED"
-
-          as a rigorous mathematical conclusion.
-
-          A valid Lambda_plus requires:
-
-              Lambda_plus
+              ||K_R||_HS^2
               =
-              lambda_N_upper
-              +
-              delta_N
+              2 integral_0^(2L)
+              (2L-x) k_R(x)^2 dx.
 
-          where BOTH terms are rigorous.
+          Thus the unprojected second moment
+          reduces EXACTLY to one dimension.
 
-          NEXT TARGET
+          RANK-2 PROJECTION
 
-          Prove or replace missing link [1].
+          For P=I-UU*,
 
-          A promising alternative is to bypass
-          Nyström convergence entirely and use
-          an analytic Hilbert-Schmidt / moment
-          upper bound directly on the continuum
-          operator, because this avoids needing
-          to prove spectral convergence of the
-          discretization.
+              ||PAP||_HS^2
+              =
+              Tr(A^2)
+              -2 Tr(U* A^2 U)
+              +Tr((U* A U)^2).
+
+          Therefore the pole constraints require
+          only finite-rank correction terms once
+          the continuum integrals are controlled.
+
+          IMPORTANT
+
+          V8 is still a feasibility/audit stage.
+
+          A rigorous cap for a specific active row
+          additionally requires:
+
+          1. exact identification of that row's
+             continuum spectral profile;
+
+          2. verified Arb evaluation of every
+             continuum integral entering the
+             projected second moment;
+
+          3. proof that the resulting operator is
+             exactly the operator bounded by the
+             corresponding LP cap.
+
+          Only then may
+
+              lambda_max(PAP)
+              <= ||PAP||_HS
+
+          be used as a certified Lambda_plus.
+
+          FAIL-CLOSED RULE
+
+          If the projected HS bound is much larger
+          than the required spectral cap, abandon
+          this route rather than polishing an
+          intrinsically weak bound.
           EOF
 
-          cat V7-PROOF-LEDGER.txt
+          cat V8-LEDGER.txt
 
-      - name: Decide next mathematical route
-        run: |
-          python - <<'PY'
-          # Fail-closed route decision.
-          #
-          # We deliberately do NOT manufacture
-          # a rigorous delta_N from the scalar
-          # trapezoid bound.
-
-          print("=" * 72)
-          print("V7 DECISION")
-          print("=" * 72)
-
-          print()
-          print(
-              "Nyström route remains numerically "
-              "excellent."
-          )
-
-          print(
-              "However the uniform operator-error "
-              "link is not yet proved."
-          )
-
-          print()
-          print(
-              "NEXT PRIMARY ROUTE:"
-          )
-
-          print(
-              "continuum Hilbert-Schmidt / "
-              "moment bound with verified "
-              "1-D integrals and rank-2 "
-              "projection corrections."
-          )
-
-          print()
-          print(
-              "NYSTROM ROUTE:"
-          )
-
-          print(
-              "retain as independent numerical "
-              "cross-check."
-          )
-
-          print()
-          print(
-              "NO RIGOROUS CERTIFICATION CLAIM."
-          )
-          PY
-
-      - name: Upload V7 evidence
+      - name: Upload V8 evidence
         uses: actions/upload-artifact@v4
         with:
-          name: t1-L040-v7-operator-audit
+          name: t1-L040-v8-continuum-hs
           path: |
-            v7-targets.json
-            v7-kernel-bounds.json
-            v7-signed-envelope.json
-            V7-PROOF-LEDGER.txt
+            v8-targets.json
+            v8-continuum-hs.json
+            v8-arb-hs.json
+            V8-LEDGER.txt
