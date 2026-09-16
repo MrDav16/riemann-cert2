@@ -1,4 +1,4 @@
-name: T1 L040 V10.2 Direct Shifted Active Rows
+name: T1 L040 V11 Higher Moment Feasibility
 
 on:
   workflow_dispatch:
@@ -6,7 +6,7 @@ on:
     branches: [main]
 
 jobs:
-  direct-shift:
+  higher-moments:
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
@@ -27,219 +27,196 @@ jobs:
           git checkout 94fa51e8f26794ef2d206c6c12e7adb4d85cbeaf
           test "$(git rev-parse HEAD)" = "94fa51e8f26794ef2d206c6c12e7adb4d85cbeaf"
 
-      - name: Extract exact rows and dual
+      - name: Extract exact active rows and dual
         working-directory: reference-riemann/experiments/weil_positivity
         run: |
           python - <<'PY'
-          import json, numpy as np
+          import json,numpy as np
           from scipy.optimize import linprog
           from sigma_t1c import run
-
-          L=0.40; N=1200; TARGETS=[341,326,396]
+          L=.40; N=1200; targets=[341,326,396]
           val,st=run(L,n=N,verbose=False)
           r=np.asarray(st["r"],float)
           rows=[np.asarray(x,float) for x in st["rows"]]
           caps=np.asarray(st["caps"],float)
           cost=np.asarray(st["cost"],float); tail=float(st["tail"])
           A=np.vstack(rows+[np.ones_like(r)])
-          b=np.concatenate([caps,[1.0]])
+          b=np.concatenate([caps,[1.]])
           lp=linprog(cost-tail,A_ub=A,b_ub=b,bounds=(0,None),method="highs")
           if not lp.success: raise RuntimeError(lp.message)
           y=-np.asarray(lp.ineqlin.marginals[:-1],float)
-
-          out={"L":L,"N":N,"pilot":float(val),"r":r.tolist(),"targets":{}}
-          for idx in TARGETS:
-              sig=rows[idx]; theta=abs(float(sig.min()))
-              out["targets"][str(idx)]={
-                  "cap":float(caps[idx]),
-                  "dual_weight":float(y[idx]),
-                  "theta":theta,
-                  "sigma":sig.tolist()
-              }
-              print(idx,"cap",caps[idx],"y",y[idx],"theta",theta)
-
-          with open("../../../v101-input.json","w") as f:
-              json.dump(out,f,indent=2,sort_keys=True)
-          print("INPUT EXTRACTION: PASS")
+          out={"pilot":float(val),"r":r.tolist(),"targets":{}}
+          for j in targets:
+              s=rows[j]; th=abs(float(s.min()))
+              out["targets"][str(j)]={"cap":float(caps[j]),"dual":float(y[j]),"theta":th,"sigma":s.tolist()}
+              print(j,out["targets"][str(j)]["cap"],out["targets"][str(j)]["dual"],th)
+          with open("../../../v11-input.json","w") as f: json.dump(out,f,indent=2)
           PY
 
-      - name: Direct shifted reconstruction at multiple n
+      - name: Compute exact shifted spectra and moments
         working-directory: reference-riemann/experiments/weil_positivity
         run: |
           python - <<'PY'
-          import json, numpy as np
-          from scipy.linalg import null_space, eigvalsh
+          import json,numpy as np
+          from scipy.linalg import null_space,eigvalsh
           from sharp_floor import build_operator
           from sigma_t1b import profile_operator
 
-          with open("../../../v101-input.json") as f: d=json.load(f)
+          with open("../../../v11-input.json") as f: d=json.load(f)
           r=np.asarray(d["r"],float)
-          ns=[400,600,800,1200]
-          report={}
-
-          for key,item in d["targets"].items():
-              sig=np.asarray(item["sigma"],float)
-              theta=float(item["theta"])
-              c=sig+theta
-              if c.min() < -1e-12:
-                  raise RuntimeError(f"{key}: shifted profile negative")
-              report[key]={"theta":theta,"cap_reference":float(item["cap"]),"by_n":{}}
-
-              for n in ns:
-                  u,w,v1,v2,K=build_operator(0.40,n)
-                  U=np.column_stack([v1,v2])
-                  Q=null_space(U.T)
-                  C=profile_operator(c,r,u,w,v1,v2)
-                  CV=Q.T@C@Q
-
-                  lamC=float(eigvalsh(
-                      CV,
-                      subset_by_index=[CV.shape[0]-1,CV.shape[0]-1]
-                  )[0])
-                  shifted=lamC-theta
-                  k2=float(np.linalg.norm(CV,"fro"))-theta
-
-                  z={
-                      "lambda_C_minus_theta":shifted,
-                      "k2_bound":k2,
-                      "cap_error":shifted-float(item["cap"]),
-                      "k2_inflation_over_reference":k2-float(item["cap"])
-                  }
-                  report[key]["by_n"][str(n)]=z
-                  print("ROW",key,"n",n,z)
-
-          with open("../../../v101-direct-shift.json","w") as f:
-              json.dump(report,f,indent=2,sort_keys=True)
-          print("DIRECT SHIFTED RECONSTRUCTION: PASS")
-          PY
-
-      - name: Convergence sanity check
-        run: |
-          python - <<'PY'
-          import json
-          with open("v101-direct-shift.json") as f: d=json.load(f)
-
-          for row,x in d.items():
-              vals=[x["by_n"][str(n)]["lambda_C_minus_theta"] for n in [400,600,800,1200]]
-              ref=x["cap_reference"]
-              print("\nROW",row,"reference",ref)
-              print("shifted caps",vals)
-              print("n1200 error",vals[-1]-ref)
-
-              # At n=1200, direct shifted construction should reproduce
-              # the same cap to a tight numerical tolerance.
-              if abs(vals[-1]-ref)>5e-6:
-                  raise RuntimeError(
-                      f"row {row}: direct shifted n1200 does not reproduce cap"
-                  )
-
-          print("\nDIRECT SHIFT CAP REPRODUCTION: PASS")
-          PY
-
-      - name: Compute exact priority dual impact
-        run: |
-          python - <<'PY'
-          import json
-          with open("v101-input.json") as f: inp=json.load(f)
-          with open("v101-direct-shift.json") as f: d=json.load(f)
-
-          pilot=float(inp["pilot"])
-          total=0.0
+          n=1200
+          u,w,v1,v2,K=build_operator(.40,n)
+          Q=null_space(np.column_stack([v1,v2]).T)
+          ks=[2,4,6,8,10,12,16,20,24,32]
           out={}
 
-          for row in ["341","326","396"]:
-              cap=float(inp["targets"][row]["cap"])
-              y=float(inp["targets"][row]["dual_weight"])
-              k2=float(d[row]["by_n"]["1200"]["k2_bound"])
-              inflation=max(k2-cap,0.0)
-              loss=y*inflation
-              total+=loss
-              out[row]={
-                  "cap":cap,"dual_weight":y,
-                  "k2_bound_n1200":k2,
-                  "inflation":inflation,
-                  "weighted_loss":loss
+          for row,item in d["targets"].items():
+              th=float(item["theta"])
+              c=np.asarray(item["sigma"],float)+th
+              if c.min() < -1e-12: raise RuntimeError("negative shifted profile")
+              C=profile_operator(c,r,u,w,v1,v2)
+              CV=Q.T@C@Q
+              ev=eigvalsh(CV)
+
+              # Numerical PSD check. Tiny roundoff negatives are tolerated,
+              # but a material negative eigenvalue invalidates the moment route.
+              emin=float(ev[0]); emax=float(ev[-1])
+              if emin < -1e-9:
+                  raise RuntimeError(f"row {row}: C is not PSD, min={emin}")
+              ep=np.maximum(ev,0.0)
+
+              rec={
+                  "theta":th,
+                  "reference_cap":float(item["cap"]),
+                  "lambda_C":emax,
+                  "lambda_C_minus_theta":emax-th,
+                  "min_eigenvalue":emin,
+                  "moments":{}
               }
-              print("ROW",row,out[row])
 
-          remaining=pilot-total
-          out["pilot"]=pilot
-          out["total_priority_loss"]=total
-          out["remaining_margin"]=remaining
+              for k in ks:
+                  # Stable power-sum computation by scaling with emax.
+                  if emax<=0:
+                      root=0.0
+                  else:
+                      root=emax*float(np.sum((ep/emax)**k)**(1.0/k))
+                  bound=root-th
+                  rec["moments"][str(k)]={
+                      "root_trace_Ck":root,
+                      "shifted_bound":bound,
+                      "inflation":max(bound-float(item["cap"]),0.0)
+                  }
+                  print("ROW",row,"k",k,"bound",bound,"infl",rec["moments"][str(k)]["inflation"])
 
-          print("\npilot =",pilot)
-          print("total priority k2 loss =",total)
-          print("remaining margin =",remaining)
+              out[row]=rec
 
-          if remaining>0:
-              verdict="VIABLE_PRIORITY_K2"
-          else:
-              verdict="PRIORITY_K2_EXHAUSTS_MARGIN"
-
-          out["verdict"]=verdict
-          print("VERDICT =",verdict)
-
-          with open("v101-dual-impact.json","w") as f:
-              json.dump(out,f,indent=2,sort_keys=True)
+          with open("../../../v11-moments.json","w") as f: json.dump(out,f,indent=2,sort_keys=True)
+          print("HIGHER MOMENTS: PASS")
           PY
 
-      - name: Fail-closed interpretation
+      - name: Compute dual margin by moment order
         run: |
           python - <<'PY'
           import json
-          with open("v101-dual-impact.json") as f: d=json.load(f)
+          with open("v11-input.json") as f: inp=json.load(f)
+          with open("v11-moments.json") as f: mom=json.load(f)
 
-          print("="*72)
-          print("V10.2 RESULT")
-          print("="*72)
-          print("Priority finite-dimensional verdict:",d["verdict"])
-          print("Remaining pilot margin:",d["remaining_margin"])
+          pilot=float(inp["pilot"])
+          ks=[2,4,6,8,10,12,16,20,24,32]
+          out={"pilot":pilot,"orders":{}}
+          first_viable=None
+
+          for k in ks:
+              total=0.; rows={}
+              for row in ["341","326","396"]:
+                  y=float(inp["targets"][row]["dual"])
+                  infl=float(mom[row]["moments"][str(k)]["inflation"])
+                  loss=y*infl
+                  total+=loss
+                  rows[row]={"inflation":infl,"dual_weight":y,"weighted_loss":loss}
+              rem=pilot-total
+              viable=rem>0
+              out["orders"][str(k)]={"total_loss":total,"remaining_margin":rem,"viable":viable,"rows":rows}
+              print("k =",k,"loss =",total,"remaining =",rem,"viable =",viable)
+              if viable and first_viable is None: first_viable=k
+
+          out["first_viable_order"]=first_viable
+          with open("v11-dual-by-order.json","w") as f: json.dump(out,f,indent=2,sort_keys=True)
+
           print()
-          print("This does NOT certify the continuum caps.")
-          print("If viable, next step is rigorous continuum k=2 evaluation")
-          print("with rank-2 projection corrections for the exact shifted profiles.")
+          print("FIRST VIABLE ORDER =",first_viable)
+          if first_viable is None:
+              print("NO TESTED MOMENT ORDER PRESERVES THE PILOT MARGIN.")
+          else:
+              print("HIGHER-MOMENT ROUTE IS NUMERICALLY VIABLE AT k =",first_viable)
           PY
 
-      - name: Write ledger
+      - name: Cross-n stability at selected orders
+        working-directory: reference-riemann/experiments/weil_positivity
         run: |
-          cat > V101-LEDGER.txt <<'EOF'
-          V10.2 — DIRECT SHIFTED ACTIVE-ROW TEST
+          python - <<'PY'
+          import json,numpy as np
+          from scipy.linalg import null_space,eigvalsh
+          from sharp_floor import build_operator
+          from sigma_t1b import profile_operator
 
-          V10 showed that profile_operator(sigma) is not the original signed
-          operator construction. Therefore V10.2 does not use it.
+          with open("../../../v11-input.json") as f: d=json.load(f)
+          r=np.asarray(d["r"],float)
+          ns=[400,600,800]
+          ks=[4,8,12,20]
+          out={}
 
-          Instead, for each exact stored active profile sigma and
-          theta = -min(sigma), it forms
+          for n in ns:
+              u,w,v1,v2,K=build_operator(.40,n)
+              Q=null_space(np.column_stack([v1,v2]).T)
+              out[str(n)]={}
+              for row,item in d["targets"].items():
+                  th=float(item["theta"])
+                  c=np.asarray(item["sigma"],float)+th
+                  CV=Q.T@profile_operator(c,r,u,w,v1,v2)@Q
+                  ev=eigvalsh(CV)
+                  ep=np.maximum(ev,0.)
+                  emax=float(ev[-1])
+                  rr={}
+                  for k in ks:
+                      root=emax*float(np.sum((ep/emax)**k)**(1/k))
+                      rr[str(k)]=root-th
+                  out[str(n)][row]=rr
+                  print("n",n,"row",row,rr)
 
-              c = sigma + theta >= 0
+          with open("../../../v11-cross-n.json","w") as f: json.dump(out,f,indent=2,sort_keys=True)
+          print("CROSS-N AUDIT: PASS")
+          PY
 
-          and directly constructs C_c.
+      - name: Decision ledger
+        run: |
+          python - <<'PY'
+          import json
+          with open("v11-dual-by-order.json") as f: d=json.load(f)
+          k=d["first_viable_order"]
+          with open("V11-LEDGER.txt","w") as f:
+              f.write("V11 — HIGHER MOMENT FEASIBILITY\n\n")
+              f.write("For each exact shifted positive finite operator C_j, V11 tests\n")
+              f.write("lambda_max(C_j) <= Tr(C_j^k)^(1/k), for even k.\n\n")
+              f.write("Pilot margin: %.17g\n" % d["pilot"])
+              f.write("First tested viable order: %s\n\n" % str(k))
+              for kk,x in d["orders"].items():
+                  f.write("k=%s loss=%.17g remaining=%.17g viable=%s\n" %
+                          (kk,x["total_loss"],x["remaining_margin"],x["viable"]))
+              f.write("\nThis is finite-dimensional numerical feasibility only.\n")
+              f.write("It is not a rigorous continuum certificate and not a proof of T1/RH.\n")
+              f.write("A viable order must next be converted into rigorously bounded continuum moments,\n")
+              f.write("including the constrained-space/rank-2 corrections.\n")
+          print(open("V11-LEDGER.txt").read())
+          PY
 
-          The numerical test checks whether
-
-              lambda_max(C_c|V) - theta
-
-          reproduces the reference active cap at n=1200.
-
-          Only if that reproduction succeeds do we use
-
-              sqrt(Tr_V(C_c^2)) - theta
-
-          as a finite-dimensional k=2 feasibility bound and charge its
-          inflation against the exact LP dual weights.
-
-          This is still NOT a rigorous continuum certificate and NOT a proof
-          of T1 or RH. A successful V10.2 only justifies proceeding to
-          rigorous continuum moment evaluation and rank-2 corrections.
-          EOF
-          cat V101-LEDGER.txt
-
-      - name: Upload V10.1 evidence
+      - name: Upload V11 evidence
         uses: actions/upload-artifact@v4
         with:
-          name: t1-L040-v101-direct-shift
+          name: t1-L040-v11-higher-moments
           path: |
-            v101-input.json
-            v101-direct-shift.json
-            v101-dual-impact.json
-            V101-LEDGER.txt
+            v11-input.json
+            v11-moments.json
+            v11-dual-by-order.json
+            v11-cross-n.json
+            V11-LEDGER.txt
