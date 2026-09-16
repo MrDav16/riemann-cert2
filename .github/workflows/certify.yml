@@ -1,4 +1,4 @@
-name: T1 L040 V24 Frozen Reproduction Row326
+name: T1 L040 V25 Extract Minimal Dual Certificate
 
 on:
   workflow_dispatch:
@@ -6,9 +6,10 @@ on:
     branches: [main]
 
 jobs:
-  frozen-reproduction:
+  extract-dual:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
+
     steps:
       - uses: actions/checkout@v4
 
@@ -16,276 +17,359 @@ jobs:
         with:
           python-version: "3.12.14"
 
-      - name: Install frozen Python dependencies
+      - name: Install frozen dependencies
         run: |
           python -m pip install --upgrade pip==26.2.1
-          pip install numpy==2.5.3 scipy==1.18.1 mpmath==1.4.1 python-flint==0.9.0
-          python - <<'PY'
-          import json,sys,numpy,scipy,mpmath,flint
-          d={"python":sys.version,"numpy":numpy.__version__,"scipy":scipy.__version__,
-             "mpmath":mpmath.__version__,"python_flint":flint.__version__}
-          open("v24-environment.json","w").write(json.dumps(d,indent=2))
-          print(json.dumps(d,indent=2))
-          PY
+          pip install numpy==2.5.3 scipy==1.18.1 mpmath==1.4.1
 
-      - name: Fetch and verify frozen reference
+      - name: Fetch pinned reference
         run: |
           git clone https://github.com/Kuberwastaken/riemann.git reference-riemann
           cd reference-riemann
           git checkout 94fa51e8f26794ef2d206c6c12e7adb4d85cbeaf
           test "$(git rev-parse HEAD)" = "94fa51e8f26794ef2d206c6c12e7adb4d85cbeaf"
-          git rev-parse HEAD > ../v24-reference-commit.txt
-          sha256sum experiments/weil_positivity/sharp_floor.py \
-                    experiments/weil_positivity/sigma_t1b.py \
-                    experiments/weil_positivity/sigma_t1c.py \
-                    > ../v24-reference-source.sha256
 
-      - name: Reproduce row326 from zero
+      - name: Patch instrumented V25 extractor
         working-directory: reference-riemann/experiments/weil_positivity
         run: |
-          python - <<'PY'
-          import json,numpy as np
-          from scipy.linalg import null_space,eigh
-          from sigma_t1c import run
-          from sharp_floor import build_operator
-          from sigma_t1b import profile_operator
+          cat > v25_extract.py <<'PY'
+          import json, numpy as np
+          from scipy.optimize import linprog
+          from scipy.sparse.linalg import eigsh
+          from itertools import combinations
 
-          L=.4;N=1200;ROW=326
-          val,st=run(L,n=N,verbose=False)
-          r=np.asarray(st["r"],float)
-          sig=np.asarray(st["rows"][ROW],float)
-          cap=float(st["caps"][ROW])
-          theta=abs(float(sig.min()))
-          c=sig+theta
+          from sharp_floor import Omega, build_operator, LOG2
+          from sigma_lp import sigma_pair_vals, project_constraints
+          from sigma_rich import rich_centers
+          from sigma_t1 import omega_w, S2L2
+          from sigma_t1b import profile_operator, lam_max_profile, clusters_of, tent
+
+          L=.4; N=1200; Rmax=22.; dR=.25; dr=.05; rounds=14
+          thetas=(.1,.2,.35,.5,.75,1.,1.5,2.,3.,4.)
 
           u,w,v1,v2,K=build_operator(L,N)
-          C=profile_operator(c,r,u,w,v1,v2)
-          V=np.column_stack([v1,v2])
-          Q=null_space(V.T)
-          A=Q.T@C@Q
-          A=(A+A.T)/2
-          lam=float(eigh(A,eigvals_only=True,
-                         subset_by_index=[A.shape[0]-1,A.shape[0]-1])[0])
+          nI=len(u)
+          r=np.arange(0.,Rmax+1e-9,dr)
+          cost=np.array([omega_w(x) for x in r])
+          tail=float(Omega(Rmax)-S2L2)
 
-          np.save("../../../v24-A.npy",A)
-          np.save("../../../v24-u.npy",u)
-          np.save("../../../v24-w.npy",w)
-          np.save("../../../v24-r.npy",r)
-          np.save("../../../v24-c.npy",c)
+          rows=[];caps=[];meta=[];band_ops={}
 
-          out={"L":L,"N":N,"row":ROW,"pilot":float(val),
-               "cap":cap,"theta":theta,"lambda_max":lam,
-               "dimension":int(A.shape[0]),
-               "V_orth_error":float(np.linalg.norm(V.T@V-np.eye(2),2)),
-               "Q_annihilation":float(np.linalg.norm(Q.T@V,2))}
-          open("../../../v24-reproduction.json","w").write(json.dumps(out,indent=2))
-          print(json.dumps(out,indent=2))
+          def add(sig,cap,kind,label,extra=None):
+              j=len(rows)
+              rows.append(np.asarray(sig,float))
+              caps.append(float(cap))
+              d={"index":j,"kind":kind,"label":label,"cap":float(cap)}
+              if extra:d.update(extra)
+              meta.append(d)
 
-          if abs(cap-0.034046683811784176)>1e-12: raise RuntimeError("cap mismatch")
-          if abs(theta-.2)>1e-12: raise RuntimeError("theta mismatch")
-          if abs(lam-0.2340466838117841)>1e-12: raise RuntimeError("lambda mismatch")
-          print("FROZEN REPRODUCTION: PASS")
-          PY
+          def band_op(R):
+              if R not in band_ops:
+                  KR,_=K(R)
+                  band_ops[R]=project_constraints(KR,v1,v2)
+              return band_ops[R]
 
-      - name: Re-derive continuum budgets independently
-        run: |
-          python - <<'PY'
-          import json,math,numpy as np
+          # Indicator caps.
+          for R in np.arange(dR,Rmax+1e-9,dR):
+              RR=round(float(R),6)
+              A=band_op(RR)
+              lam=min(1.,float(np.max(eigsh(A,k=6,which="LA",return_eigenvectors=False))))
+              add((r<=R+1e-12).astype(float),lam,"indicator",f"ind_{R:.2f}",{"R":float(R)})
 
-          L=.4;N=1200
-          h=2*L/(N-1)
+          # Fejer dictionary.
+          for cc in rich_centers():
+              for a in (1.5,3.,6.):
+                  sig=sigma_pair_vals(r,cc,a)
+                  lam=lam_max_profile(sig,r,u,w,v1,v2)
+                  add(sig,lam,"fejer",f"fejer_c{cc:.6g}_a{a:.6g}",
+                      {"center":float(cc),"width":float(a)})
 
-          # V17: interpolation of the two pole-constraint synthesis functions.
-          delta=math.sqrt(2*L)*h*h/32*math.sqrt(2*math.cosh(L))
-          gram=np.array([[2*math.sinh(L),2*L],[2*L,2*math.sinh(L)]])
-          sigma=math.sqrt(np.linalg.eigvalsh(gram)[0])
-          projector=delta/(sigma-delta)
+          # Cosine-modulated caps.
+          for cc in (7.,8.,9.,10.,12.,17.,18.,19.):
+              for sgn in (1.,-1.):
+                  sig=sigma_pair_vals(r,cc,3.)*(1.+sgn*np.cos(r*LOG2))
+                  lam=lam_max_profile(sig,r,u,w,v1,v2)
+                  add(sig,lam,"cos_mod",f"cos_c{cc:g}_sgn{sgn:+g}",
+                      {"center":cc,"sign":sgn,"width":3.})
 
-          # Preserve the established V17 combined theorem budget. Record both
-          # the freshly re-derived projector ingredient and frozen combined value.
-          e_u=1.7962225841646505e-06
+          sig=np.clip(1.-r/21.,0.,None)*(1.+np.cos(r*LOG2))
+          add(sig,lam_max_profile(sig,r,u,w,v1,v2),"cos_taper","cos_taper_plus")
+          sig=np.clip(1.-r/21.,0.,None)*(1.-np.cos(r*LOG2))
+          add(sig,lam_max_profile(sig,r,u,w,v1,v2),"cos_taper","cos_taper_minus")
 
-          # V21 r-quadrature: derive again directly from frozen arrays.
-          r=np.load("v24-r.npy");c=np.load("v24-c.npy")
-          u=np.load("v24-u.npy");w=np.load("v24-w.npy")
-          xmax=float(u[-1]-u[0]);slopes=np.diff(c)/np.diff(r)
-          integ=0.
-          for i in range(len(r)-1):
-              hh=float(r[i+1]-r[i])
-              cp=abs(float(slopes[i]))
-              cm=max(abs(float(c[i])),abs(float(c[i+1])))
-              integ += hh**3/12*(2*cp*xmax+cm*xmax*xmax)
-          kernel=integ/math.pi
-          sw=np.sqrt(w)
-          e_r=kernel*float(np.max(sw))*float(np.sum(sw))
+          def solve():
+              A=np.vstack(rows+[np.ones_like(r)])
+              b=np.array(caps+[1.])
+              res=linprog(cost-tail,A_ub=A,b_ub=b,bounds=(0,None),method="highs")
+              if not res.success: raise RuntimeError(res.message)
+              return res
 
-          out={"h":h,"delta_T":delta,"sigma_min_T":sigma,
-               "projector_bound":projector,
-               "V17_combined_u_projector":e_u,
-               "V21_integral_bound":integ,
-               "V21_kernel_bound":kernel,
-               "V21_operator_bound":e_r}
-          open("v24-continuum-budgets.json","w").write(json.dumps(out,indent=2))
-          print(json.dumps(out,indent=2))
-          if abs(e_r-0.00027579404727644035)>1e-12:
-              raise RuntimeError("V21 budget failed reproduction")
-          PY
+          res=solve()
 
-      - name: Reproduce finite positive-definiteness witness
-        run: |
-          python - <<'PY'
-          import json,numpy as np
-          from scipy.linalg import cholesky,solve_triangular
+          # Oracle rows.
+          for cor in (.05,.15,.30,.60):
+              sig=np.maximum(cor-cost,0.)
+              add(sig,lam_max_profile(sig,r,u,w,v1,v2),
+                  "oracle",f"oracle_{cor:g}",{"c_oracle":cor})
+          res=solve()
 
-          A=np.load("v24-A.npy")
-          d=json.load(open("v24-reproduction.json"))
-          mu=float(d["lambda_max"])+1e-4
-          M=mu*np.eye(A.shape[0])-A
-          R=cholesky(M,lower=False)
-          E=M-R.T@R
+          Ppole=np.eye(nI)
+          for v in (v1,v2):Ppole-=np.outer(v,v)
 
-          Y=solve_triangular(R,np.eye(R.shape[0]),lower=False)
-          F=np.eye(R.shape[0])-R@Y
-          fi=float(np.linalg.norm(F,np.inf)); f1=float(np.linalg.norm(F,1))
-          if fi>=1 or f1>=1: raise RuntimeError("inverse witness failed")
-          bi=float(np.linalg.norm(Y,np.inf))/(1-fi)
-          b1=float(np.linalg.norm(Y,1))/(1-f1)
-          sigma2=1/(bi*b1)
+          round_history=[]
+          stalls=0
+          val=float(res.fun+tail)
 
-          n=A.shape[0];eps=np.finfo(float).eps
-          gamma=n*eps/(1-n*eps)
-          allowance=64*gamma*(abs(mu)+float(np.linalg.norm(A,np.inf))+
-                              float(np.linalg.norm(R,np.inf))**2)
-          Eup=float(np.linalg.norm(E,np.inf))+allowance
+          for rd in range(1,rounds+1):
+              x=res.x
+              cl=sorted(clusters_of(x,r),key=lambda t:-t[2])
+              if not cl:break
+              before=len(rows)
 
-          out={"mu":mu,"sigma_min_R_squared_lower":sigma2,
-               "factorization_error_upper":Eup,
-               "PD_margin":sigma2-Eup,"PD_certified_under_model":bool(Eup<sigma2)}
-          open("v24-finite-witness.json","w").write(json.dumps(out,indent=2))
-          print(json.dumps(out,indent=2))
-          if not out["PD_certified_under_model"]:
-              raise RuntimeError("finite witness failed")
-          PY
+              unions=[cl[:k] for k in range(2,len(cl)+1)]
+              unions += [list(p) for p in combinations(cl[:4],2)]
+              for ui,un in enumerate(unions):
+                  sig=np.zeros_like(r)
+                  for lo,hi,m in un:sig=np.maximum(sig,tent(r,lo,hi))
+                  add(sig,lam_max_profile(sig,r,u,w,v1,v2),
+                      "union",f"r{rd}_union_{ui}",
+                      {"round":rd,"slots":[[float(a),float(b),float(m)] for a,b,m in un]})
 
-      - name: Frozen end-to-end assembly
-        run: |
-          python - <<'PY'
-          import json
-          r=json.load(open("v24-reproduction.json"))
-          c=json.load(open("v24-continuum-budgets.json"))
-          f=json.load(open("v24-finite-witness.json"))
+              for si,(lo,hi,mass) in enumerate(cl[:4]):
+                  if mass<.05:continue
+                  sb=tent(r,lo,hi)
+                  Kb=profile_operator(sb,r,u,w,v1,v2)
+                  cut=hi+2.
+                  if cut<Rmax-1.:
+                      Rc=round(float(np.ceil(cut/dR)*dR),6)
+                      Bc=band_op(Rc)
+                      for th in thetas:
+                          A=Kb-th*(Ppole-Bc)
+                          lam=float(np.max(eigsh(A,k=6,which="LA",return_eigenvectors=False)))
+                          add(sb-th*(r>cut).astype(float),lam,
+                              "signed_tail",f"r{rd}_slot{si}_tail_th{th:g}",
+                              {"round":rd,"slot":[float(lo),float(hi),float(mass)],
+                               "theta":th,"cut":float(cut),"band_cap_R":Rc})
+                  swide=tent(r,max(lo-2.,0.),min(hi+2.,Rmax))
+                  Kw=profile_operator(swide,r,u,w,v1,v2)
+                  for th in thetas:
+                      A=Kb-th*(Ppole-Kw)
+                      lam=float(np.max(eigsh(A,k=6,which="LA",return_eigenvectors=False)))
+                      add(sb-th*(1.-swide),lam,
+                          "signed_wide",f"r{rd}_slot{si}_wide_th{th:g}",
+                          {"round":rd,"slot":[float(lo),float(hi),float(mass)],
+                           "theta":th})
 
-          eu=float(c["V17_combined_u_projector"])
-          er=float(c["V21_operator_bound"])
-          ef=1e-4
-          total=eu+er+ef
-          cap=float(r["cap"])
-          upper=cap+total
-          allowed=cap+.010
+              if len(cl)>=2:
+                  (lo1,hi1,m1),(lo2,hi2,m2)=cl[0],cl[1]
+                  sab=np.maximum(tent(r,lo1,hi1),tent(r,lo2,hi2))
+                  Kab=profile_operator(sab,r,u,w,v1,v2)
+                  wab=np.maximum(tent(r,max(lo1-2,0),min(hi1+2,Rmax)),
+                                 tent(r,max(lo2-2,0),min(hi2+2,Rmax)))
+                  Kwab=profile_operator(wab,r,u,w,v1,v2)
+                  for th in thetas:
+                      A=Kab-th*(Ppole-Kwab)
+                      lam=float(np.max(eigsh(A,k=6,which="LA",return_eigenvectors=False)))
+                      add(sab-th*(1.-wab),lam,
+                          "signed_joint",f"r{rd}_joint_th{th:g}",
+                          {"round":rd,"theta":th,
+                           "slots":[[float(lo1),float(hi1),float(m1)],
+                                    [float(lo2),float(hi2),float(m2)]]})
 
-          out={"row":326,
-               "finite_reference_lambda_upper":float(f["mu"]),
-               "V17_u_projector":eu,
-               "V21_r_quadrature":er,
-               "V24_finite_shift":ef,
-               "total_inflation":total,
-               "cap":cap,
-               "candidate_shifted_continuum_upper":upper,
-               "allowed_upper":allowed,
-               "remaining_margin":allowed-upper,
-               "within_budget":bool(upper<allowed)}
-          open("v24-assembly.json","w").write(json.dumps(out,indent=2))
-          print(json.dumps(out,indent=2))
-          if not out["within_budget"]: raise RuntimeError("frozen assembly failed")
-          PY
+              res2=solve()
+              val2=float(res2.fun+tail)
+              round_history.append({"round":rd,"rows_before":before,"rows_after":len(rows),
+                                    "value":val2,
+                                    "clusters":[[float(a),float(b),float(m)] for a,b,m in cl]})
+              stalls=stalls+1 if abs(val2-val)<1e-4 else 0
+              val=val2;res=res2
+              if stalls>=3 or val>=.03:break
 
-      - name: Generate deterministic manifest
-        run: |
-          sha256sum \
-            v24-environment.json \
-            v24-reference-commit.txt \
-            v24-reference-source.sha256 \
-            v24-reproduction.json \
-            v24-continuum-budgets.json \
-            v24-finite-witness.json \
-            v24-assembly.json \
-            > V24-MANIFEST.sha256
-          cat V24-MANIFEST.sha256
+          # HiGHS inequality marginals are derivatives w.r.t. b_ub.
+          # For a minimization problem with A x <= b they are <=0.
+          # Our nonnegative dual weights are therefore y=-marginal.
+          marg=np.asarray(res.ineqlin.marginals,float)
+          residual=np.asarray(res.ineqlin.residual,float)
+          y=-marg[:-1]
+          y_mass=float(-marg[-1])
+          tol=1e-9
+          active=np.flatnonzero(y>tol)
 
-      - name: Verify manifest immediately
-        run: |
-          sha256sum -c V24-MANIFEST.sha256
+          # Pointwise dual lower envelope on the sampled r-grid:
+          # cost-tail objective has constraints rows*x <= caps and mass<=1.
+          # Dual identity gives a lower bound tail - sum y_j cap_j - y_mass
+          # provided cost-tail + sum y_j row_j + y_mass >=0 pointwise.
+          dual_slack=(cost-tail)+np.sum(
+              np.asarray([y[j]*rows[j] for j in range(len(rows))]),axis=0
+          )+y_mass
 
-      - name: Frozen reproduction verdict
-        run: |
-          python - <<'PY'
-          import json
-          a=json.load(open("v24-assembly.json"))
-          verdict={
-            "row":326,
-            "frozen_reproduction_pass":bool(a["within_budget"]),
-            "continuum_certified":False,
-            "status":"FROZEN_REPRODUCTION_PASSES",
-            "automatic_proof_claim":False,
-            "reason_for_fail_closed":
-              "automated reproduction is not independent peer review of the mathematical lemmas",
-            "next_requirement":
-              "produce a human-readable proof dossier with every lemma and source-code identity, then obtain independent mathematical review"
+          dual_floor=float(tail-np.dot(y,np.asarray(caps))-y_mass)
+          primal_floor=float(res.fun+tail)
+
+          active_rows=[]
+          for j in active:
+              d=dict(meta[int(j)])
+              d.update({"dual_weight":float(y[j]),
+                        "constraint_slack":float(residual[j]),
+                        "weighted_cap":float(y[j]*caps[j]),
+                        "sigma_min":float(np.min(rows[j])),
+                        "sigma_max":float(np.max(rows[j]))})
+              active_rows.append(d)
+
+          # Save exact active sigma arrays for later batch certification.
+          np.savez("../../../v25-active-sigmas.npz",
+                   r=r,indices=active.astype(int),
+                   sigmas=np.asarray([rows[j] for j in active]),
+                   caps=np.asarray([caps[j] for j in active]),
+                   dual_weights=np.asarray([y[j] for j in active]))
+
+          out={
+              "L":L,"N":N,"Rmax":Rmax,"dr":dr,
+              "total_dictionary_rows":len(rows),
+              "active_cap_count":int(len(active)),
+              "active_indices":[int(j) for j in active],
+              "mass_dual_weight":y_mass,
+              "primal_floor":primal_floor,
+              "dual_floor_reconstructed":dual_floor,
+              "primal_dual_gap":float(primal_floor-dual_floor),
+              "sampled_dual_slack_min":float(np.min(dual_slack)),
+              "sampled_dual_slack_max":float(np.max(dual_slack)),
+              "active_rows":active_rows,
+              "round_history":round_history
           }
-          open("v24-verdict.json","w").write(json.dumps(verdict,indent=2))
-          print(json.dumps(verdict,indent=2))
+          with open("../../../v25-dual-certificate.json","w") as f:
+              json.dump(out,f,indent=2)
+
+          # Human-readable table.
+          with open("../../../V25-ACTIVE-CAPS.txt","w") as f:
+              f.write("V25 MINIMAL DUAL SUPPORT - L=0.40\n\n")
+              f.write(f"primal floor: {primal_floor:.17g}\n")
+              f.write(f"dual reconstructed floor: {dual_floor:.17g}\n")
+              f.write(f"gap: {primal_floor-dual_floor:.3e}\n")
+              f.write(f"dictionary rows: {len(rows)}\n")
+              f.write(f"active cap rows (y>1e-9): {len(active)}\n")
+              f.write(f"mass dual weight: {y_mass:.17g}\n")
+              f.write(f"sampled dual slack min: {np.min(dual_slack):.3e}\n\n")
+              f.write("index | y | cap | y*cap | kind | label\n")
+              for d in active_rows:
+                  f.write(f"{d['index']:5d} | {d['dual_weight']:.12g} | "
+                          f"{d['cap']:.12g} | {d['weighted_cap']:.12g} | "
+                          f"{d['kind']} | {d['label']}\n")
+
+          print(json.dumps(out,indent=2))
+
+          if primal_floor<=0: raise RuntimeError("pilot LP no longer positive")
+          if abs(primal_floor-dual_floor)>1e-7:
+              raise RuntimeError("primal/dual reconstruction mismatch")
+          if np.min(dual_slack)<-1e-7:
+              raise RuntimeError("sampled dual feasibility reconstruction failed")
+          if len(active)==0:
+              raise RuntimeError("no active cap rows extracted")
+          print("V25 MINIMAL DUAL EXTRACTION: PASS")
           PY
 
-      - name: Write frozen dossier README
+      - name: Run V25 extractor
+        working-directory: reference-riemann/experiments/weil_positivity
         run: |
-          cat > V24-README.txt <<'EOF'
-          V24 â€” FROZEN REPRODUCTION DOSSIER, ROW 326
+          python v25_extract.py
 
-          This workflow starts from a clean GitHub runner and reproduces the
-          row-326 numerical chain using:
+      - name: Analyze support concentration
+        run: |
+          python - <<'PY'
+          import json
+          d=json.load(open("v25-dual-certificate.json"))
+          rows=d["active_rows"]
+          rows=sorted(rows,key=lambda x:-x["weighted_cap"])
+          total=sum(abs(x["weighted_cap"]) for x in rows)
+          cum=0.
+          summary=[]
+          for k,x in enumerate(rows,1):
+              cum+=abs(x["weighted_cap"])
+              summary.append({"rank":k,"index":x["index"],"kind":x["kind"],
+                              "label":x["label"],"dual_weight":x["dual_weight"],
+                              "weighted_cap":x["weighted_cap"],
+                              "cumulative_abs_weighted_cap_fraction":
+                                (cum/total if total else 0.)})
+          out={"active_count":len(rows),"ranked_active_rows":summary}
+          open("v25-support-ranking.json","w").write(json.dumps(out,indent=2))
+          print(json.dumps(out,indent=2))
+          PY
 
-            Python 3.12.14
-            NumPy 2.5.3
-            SciPy 1.18.1
-            mpmath 1.4.1
-            python-flint 0.9.0
+      - name: Fail-closed V25 decision
+        run: |
+          python - <<'PY'
+          import json
+          d=json.load(open("v25-dual-certificate.json"))
+          decision={
+            "stage":"V25",
+            "T1_certified":False,
+            "continuum_caps_certified":False,
+            "active_cap_count":d["active_cap_count"],
+            "active_indices":d["active_indices"],
+            "status":"MINIMAL_DUAL_SUPPORT_EXTRACTED",
+            "next_requirement":
+              "certify ValidCap for every active row, then certify pointwise dual feasibility off-grid and Parseval/integrability hypotheses"
+          }
+          open("v25-decision.json","w").write(json.dumps(decision,indent=2))
+          print(json.dumps(decision,indent=2))
+          PY
 
-          Reference repository commit:
-            94fa51e8f26794ef2d206c6c12e7adb4d85cbeaf
+      - name: Write V25 ledger
+        run: |
+          cat > V25-LEDGER.txt <<'EOF'
+          V25 — MINIMAL DUAL CERTIFICATE EXTRACTION
 
-          No intermediate numerical artifacts from V15-V23 are consumed.
+          Purpose:
+          determine which dictionary caps actually carry nonzero dual weight
+          in the final L=0.40 sigma-LP certificate.
 
-          The workflow independently reconstructs:
-            - the row-326 finite operator,
-            - the top finite eigenvalue,
-            - the V17 constraint/projector ingredients,
-            - the V21 r-quadrature bound,
-            - the finite positive-definiteness witness,
-            - the final error-budget assembly.
+          Why:
+          T1_of_certificate requires ValidCap for every row used by the dual
+          certificate, not merely row 326. Rows with zero dual weight can be
+          omitted from a reduced certificate.
 
-          SHA-256 hashes are generated for the evidence files and immediately
-          verified.
+          Method:
+          reproduce sigma_t1c's dictionary/cutting-plane construction while
+          retaining metadata for every generated row. Solve the final HiGHS LP,
+          extract inequality marginals, and convert them to nonnegative dual
+          weights y=-marginal. Reconstruct the dual floor and sampled pointwise
+          feasibility as consistency checks.
 
-          IMPORTANT:
-          A successful V24 is a reproducibility result, not peer review and not
-          a proof of T1 or the Riemann hypothesis. continuum_certified remains
-          false until the mathematical lemma chain receives independent review.
+          Outputs:
+          - exact list of active row indices and metadata;
+          - dual weights and weighted caps;
+          - exact active sigma arrays on the r-grid;
+          - primal/dual consistency diagnostics;
+          - support-concentration ranking.
 
-          NO T1/RH PROOF CLAIM IS MADE.
+          Important:
+          V25 is extraction only. It does NOT certify T1 and does NOT claim that
+          sampled dual feasibility implies continuum pointwise feasibility.
+
+          NO RH PROOF CLAIM IS MADE.
           EOF
 
-      - name: Upload frozen V24 dossier
+      - name: Hash V25 evidence
+        run: |
+          sha256sum \
+            v25-dual-certificate.json \
+            v25-active-sigmas.npz \
+            v25-support-ranking.json \
+            v25-decision.json \
+            V25-ACTIVE-CAPS.txt \
+            V25-LEDGER.txt \
+            > V25-MANIFEST.sha256
+          sha256sum -c V25-MANIFEST.sha256
+
+      - name: Upload V25 evidence
         uses: actions/upload-artifact@v4
         with:
-          name: t1-L040-v24-frozen-row326
+          name: t1-L040-v25-minimal-dual
           path: |
-            v24-environment.json
-            v24-reference-commit.txt
-            v24-reference-source.sha256
-            v24-reproduction.json
-            v24-continuum-budgets.json
-            v24-finite-witness.json
-            v24-assembly.json
-            v24-verdict.json
-            V24-MANIFEST.sha256
-            V24-README.txt
+            v25-dual-certificate.json
+            v25-active-sigmas.npz
+            v25-support-ranking.json
+            v25-decision.json
+            V25-ACTIVE-CAPS.txt
+            V25-LEDGER.txt
+            V25-MANIFEST.sha256
