@@ -36,8 +36,8 @@ jobs:
           python - <<'PY'
           import json
           import numpy as np
+
           from scipy.optimize import linprog
-          from scipy.linalg import eigh
           from flint import arb, ctx
 
           from sigma_t1c import run
@@ -49,14 +49,35 @@ jobs:
 
           val, st = run(L, verbose=True)
 
-          r = np.asarray(st["r"], dtype=float)
-          rows = [np.asarray(x, dtype=float) for x in st["rows"]]
-          caps = np.asarray(st["caps"], dtype=float)
-          cost = np.asarray(st["cost"], dtype=float)
+          r = np.asarray(
+              st["r"],
+              dtype=float
+          )
+
+          rows = [
+              np.asarray(x, dtype=float)
+              for x in st["rows"]
+          ]
+
+          caps = np.asarray(
+              st["caps"],
+              dtype=float
+          )
+
+          cost = np.asarray(
+              st["cost"],
+              dtype=float
+          )
+
           tail = float(st["tail"])
 
-          A = np.vstack(rows + [np.ones_like(r)])
-          b = np.concatenate([caps, [1.0]])
+          A = np.vstack(
+              rows + [np.ones_like(r)]
+          )
+
+          b = np.concatenate(
+              [caps, [1.0]]
+          )
 
           lp = linprog(
               cost - tail,
@@ -67,41 +88,31 @@ jobs:
           )
 
           if not lp.success:
-              raise RuntimeError(lp.message)
+              raise RuntimeError(
+                  lp.message
+              )
 
           y = -np.asarray(
               lp.ineqlin.marginals[:-1],
               dtype=float
           )
 
-          # -------------------------------------------------
-          # Recover the exact finite-dimensional construction
-          # used by the reference code.
-          # -------------------------------------------------
-
-          def load_reference_helpers():
-              import sigma_t1c
-              import sigma_lp
-              return sigma_t1c, sigma_lp
-
-          sigma_t1c, sigma_lp = load_reference_helpers()
-
-          # Inspect state for the objects already used by run().
-          print("state keys:", sorted(st.keys()))
-
-          # We deliberately compute two independent things:
-          # 1. the published cap from st["caps"]
-          # 2. refined finite-dimensional spectral values
-          #    obtained by rerunning at larger spatial n when
-          #    the helper permits it.
-          #
-          # This is NOT YET the continuum certificate.
+          print(
+              "state keys:",
+              sorted(st.keys())
+          )
 
           report = {
               "L": L,
-              "pilot_floor": float(val),
+
+              "pilot_floor":
+                  float(val),
+
               "targets": [],
-              "arb_precision_bits": int(ctx.prec),
+
+              "arb_precision_bits":
+                  int(ctx.prec),
+
               "status":
                   "FINITE_DIMENSIONAL_ENCLOSURE_ONLY"
           }
@@ -112,56 +123,90 @@ jobs:
           print("=" * 72)
 
           for idx in TARGETS:
+
               sigma = rows[idx]
 
               item = {
-                  "row": idx,
-                  "dual_weight": float(y[idx]),
+                  "row":
+                      idx,
+
+                  "dual_weight":
+                      float(y[idx]),
+
                   "published_cap_float":
                       float(caps[idx]),
+
                   "sigma_min":
-                      float(np.min(sigma)),
+                      float(
+                          np.min(sigma)
+                      ),
+
                   "sigma_max":
-                      float(np.max(sigma)),
+                      float(
+                          np.max(sigma)
+                      )
               }
 
               print()
-              print("ROW", idx)
-              print("dual y =", y[idx])
-              print("published cap =", caps[idx])
+              print(
+                  "ROW",
+                  idx
+              )
+
+              print(
+                  "dual y =",
+                  y[idx]
+              )
+
+              print(
+                  "published cap =",
+                  caps[idx]
+              )
+
               print(
                   "sigma range =",
                   np.min(sigma),
                   np.max(sigma)
               )
 
-              # ---------------------------------------------
-              # Arb enclosure of the FLOAT cap itself.
-              # This only certifies representation/rounding,
-              # NOT the mathematical spectral cap.
-              # ---------------------------------------------
+              # ---------------------------------------
+              # Arb enclosure of the stored FLOAT cap.
+              #
+              # IMPORTANT:
+              # This encloses representation/rounding
+              # only. It is NOT yet an operator-level
+              # spectral certificate.
+              # ---------------------------------------
 
-              c = arb(str(caps[idx]))
-
-              # Explicitly inflate by 1e-14 so the decimal
-              # ball safely surrounds the stored float.
-              c_ball = c.add_error(
-                  arb("1e-14")
+              c = arb(
+                  str(caps[idx])
               )
 
-              item["float_cap_arb_ball"] = str(c_ball)
+              # python-flint 0.9-compatible
+              # interval inflation.
+              c_ball = (
+                  c
+                  + arb("0 +/- 1e-14")
+              )
+
+              item[
+                  "float_cap_arb_ball"
+              ] = str(c_ball)
 
               print(
                   "Arb ball around stored cap:",
                   c_ball
               )
 
-              report["targets"].append(item)
+              report[
+                  "targets"
+              ].append(item)
 
           with open(
               "../../../v4-priority.json",
               "w"
           ) as f:
+
               json.dump(
                   report,
                   f,
@@ -173,62 +218,91 @@ jobs:
           print("=" * 72)
           print("IMPORTANT")
           print("=" * 72)
+
           print(
-              "These Arb balls enclose stored floating-point "
-              "caps only."
+              "These Arb balls enclose stored "
+              "floating-point caps only."
           )
+
           print(
-              "They DO NOT yet prove Lambda <= cap."
+              "They DO NOT yet prove "
+              "Lambda <= cap."
           )
+
           print(
-              "The remaining theorem obligation is an "
-              "operator-level continuum upper bound."
+              "The remaining theorem obligation "
+              "is an operator-level continuum "
+              "upper bound."
           )
           PY
 
-      - name: Derive rigorous perturbation lemma budget
+      - name: Derive perturbation budget
         run: |
           python - <<'PY'
           from flint import arb, ctx
 
           ctx.prec = 160
 
-          # For self-adjoint A and approximation B:
+          # For self-adjoint operators:
           #
           # lambda_max(A)
-          # <= lambda_max(B) + ||A-B||_op
-          # <= lambda_max(B) + ||A-B||_HS.
+          # <= lambda_max(B)
+          #    + ||A-B||_op
           #
-          # This stage records the exact budget that the
-          # next continuum/Nystrom remainder must satisfy.
+          # and
+          #
+          # ||A-B||_op
+          # <= ||A-B||_HS
 
-          pilot = arb("0.0847191143605307")
+          pilot = arb(
+              "0.0847191143605307"
+          )
 
-          # Reserve only half the float pilot for all
-          # spectral approximation errors.
-          target_budget = arb("0.04")
+          target_budget = arb(
+              "0.04"
+          )
 
-          print("float pilot ball =", pilot)
           print(
-              "target total spectral-error budget <",
+              "float pilot ball =",
+              pilot
+          )
+
+          print(
+              "target total spectral-error "
+              "budget <",
               target_budget
           )
 
           weights = {
-              341: arb("0.425044936115"),
-              326: arb("0.359339387719"),
-              396: arb("0.138901643818"),
+              341:
+                  arb("0.425044936115"),
+
+              326:
+                  arb("0.359339387719"),
+
+              396:
+                  arb("0.138901643818")
           }
 
-          # Equal weighted-error allocation is only an
-          # engineering target, not part of the proof.
-          per = target_budget / 6
+          # Engineering allocation only.
+          # Not itself part of the proof.
+
+          per = (
+              target_budget
+              / arb(6)
+          )
 
           print()
-          print("Suggested delta targets:")
+          print(
+              "Suggested delta targets:"
+          )
 
           for row, y in weights.items():
-              delta = per / y
+
+              delta = (
+                  per / y
+              )
+
               print(
                   row,
                   "delta <",
@@ -239,66 +313,78 @@ jobs:
 
           print()
           print(
-              "Next requirement:"
+              "NEXT REQUIREMENT:"
           )
+
           print(
-              "construct proven delta_N with "
-              "||K-K_N|| <= delta_N."
+              "Construct proven delta_N "
+              "with ||K-K_N|| <= delta_N."
           )
           PY
 
       - name: Inspect exact spectral implementation
         run: |
-          echo "===== sigma_t1c relevant spectral calls ====="
+          echo "===== sigma_t1c spectral calls ====="
+
           grep -n \
             -E "eig|eigh|lambda|cap|project|kernel|signed|theta" \
             reference-riemann/experiments/weil_positivity/sigma_t1c.py \
             | head -n 250 \
-            | tee spectral-source-map.txt
+            | tee spectral-source-map.txt || true
 
-          echo ""
-          echo "===== sigma_lp helpers ====="
+          echo "" >> spectral-source-map.txt
+          echo "===== sigma_lp helpers =====" \
+            >> spectral-source-map.txt
 
           grep -n \
             -E "eig|eigh|project|kernel|cap|sigma" \
             reference-riemann/experiments/weil_positivity/sigma_lp.py \
             | head -n 250 \
-            >> spectral-source-map.txt
+            >> spectral-source-map.txt || true
 
-          echo ""
-          echo "===== sharp_floor helpers ====="
+          echo "" >> spectral-source-map.txt
+          echo "===== sharp_floor helpers =====" \
+            >> spectral-source-map.txt
 
           grep -n \
             -E "eig|eigh|project|kernel|cap|moment|rank" \
             reference-riemann/experiments/weil_positivity/sharp_floor.py \
             | head -n 250 \
-            >> spectral-source-map.txt
+            >> spectral-source-map.txt || true
+
+          cat spectral-source-map.txt
 
       - name: Write V4 status
         run: |
           cat > V4-STATUS.txt <<'EOF'
           V4 STATUS
 
-          PASS criteria:
-          - pinned source reproduced
-          - priority rows 341,326,396 recovered
-          - Arb available at 160-bit precision
-          - stored caps enclosed as Arb balls
+          Expected PASS conditions:
+
+          - pinned reference reproduced
+          - rows 341, 326 and 396 recovered
+          - Arb running at 160-bit precision
+          - stored FLOAT caps enclosed by Arb balls
           - spectral implementation source map exported
 
-          IMPORTANT:
-          This is NOT yet a continuum spectral certificate.
+          IMPORTANT
 
-          Missing proof obligation:
+          This is NOT yet a continuum spectral
+          certificate.
+
+          Remaining mathematical obligation:
+
               lambda_max(A_continuous)
-              <= lambda_max(A_N)
-                 + delta_N
+              <=
+              lambda_max(A_N)
+              + delta_N
 
-          with a rigorously proved delta_N.
+          where delta_N is a rigorously proved
+          approximation-error bound.
 
-          Only after that bound is implemented may the
-          resulting Lambda+ values be charged against the
-          +0.084719... dual margin.
+          Only after such a delta_N exists may
+          rigorous Lambda+ values be charged
+          against the positive dual margin.
           EOF
 
           cat V4-STATUS.txt
