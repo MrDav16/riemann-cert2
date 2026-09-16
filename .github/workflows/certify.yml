@@ -1,22 +1,19 @@
-name: T1 L040 Dual Extraction
+name: T1 L040 Trace Active Caps
 
 on:
   workflow_dispatch:
   push:
-    branches:
-      - main
+    branches: [main]
 
 jobs:
-  dual:
+  trace:
     runs-on: ubuntu-latest
     timeout-minutes: 60
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
@@ -25,130 +22,234 @@ jobs:
           python -m pip install --upgrade pip
           pip install numpy scipy mpmath python-flint
 
-      - name: Verify Arb
-        run: |
-          python - <<'PY'
-          from flint import arb
-
-          x = arb("0.4")
-          print("Arb operational")
-          print("x =", x)
-          print("sin(x) =", x.sin())
-          PY
-
       - name: Fetch pinned reference
         run: |
           git clone https://github.com/Kuberwastaken/riemann.git reference-riemann
-
           cd reference-riemann
-
           git checkout 94fa51e8f26794ef2d206c6c12e7adb4d85cbeaf
+          test "$(git rev-parse HEAD)" = \
+            "94fa51e8f26794ef2d206c6c12e7adb4d85cbeaf"
 
-          echo "PINNED COMMIT:"
-          git rev-parse HEAD
-
-      - name: Run pilot and extract dual
+      - name: Trace exact active rows
         working-directory: reference-riemann/experiments/weil_positivity
         run: |
           python - <<'PY'
           import json
+          import hashlib
           import numpy as np
           from scipy.optimize import linprog
-
           from sigma_t1c import run
 
           L = 0.40
 
-          print("=" * 70)
-          print("RUNNING PINNED T1 PILOT")
-          print("=" * 70)
-
           val, st = run(L, verbose=True)
 
-          rows = st["rows"]
-          caps = np.asarray(st["caps"], dtype=float)
-          r = np.asarray(st["r"], dtype=float)
-          cost = np.asarray(st["cost"], dtype=float)
+          r = np.asarray(st["r"], dtype=np.float64)
+          cost = np.asarray(st["cost"], dtype=np.float64)
+          caps = np.asarray(st["caps"], dtype=np.float64)
+          rows = [
+              np.asarray(x, dtype=np.float64)
+              for x in st["rows"]
+          ]
           tail = float(st["tail"])
 
-          print()
-          print("pilot floor =", repr(float(val)))
-          print("number rows =", len(rows))
+          A = np.vstack(rows + [np.ones_like(r)])
+          b = np.concatenate([caps, [1.0]])
 
-          A = np.vstack(
-              [np.asarray(row, dtype=float) for row in rows]
-              + [np.ones_like(r)]
-          )
-
-          b = np.concatenate(
-              [caps, np.array([1.0])]
-          )
-
-          result = linprog(
+          res = linprog(
               cost - tail,
               A_ub=A,
               b_ub=b,
               bounds=(0, None),
-              method="highs",
+              method="highs"
           )
 
-          if not result.success:
-              raise RuntimeError(
-                  "Dual LP extraction failed: " + result.message
-              )
+          if not res.success:
+              raise RuntimeError(res.message)
 
-          marginals = np.asarray(
-              result.ineqlin.marginals,
-              dtype=float
+          y = -np.asarray(
+              res.ineqlin.marginals[:-1],
+              dtype=np.float64
           )
 
-          y = -marginals[:-1]
-          y_mass = float(-marginals[-1])
-
-          active = []
-
-          for j, weight in enumerate(y):
-              if weight > 1e-9:
-                  active.append({
-                      "index": int(j),
-                      "dual_weight": float(weight),
-                      "cap_float": float(caps[j]),
-                      "weighted_cap": float(weight * caps[j]),
-                      "row_min": float(np.min(rows[j])),
-                      "row_max": float(np.max(rows[j])),
-                      "signed_row": bool(
-                          np.min(rows[j]) < -1e-12
-                      ),
-                  })
-
-          active.sort(
-              key=lambda z: z["weighted_cap"],
-              reverse=True
+          y_mass = float(
+              -res.ineqlin.marginals[-1]
           )
 
           dual_floor = (
               tail
               - y_mass
-              - float(np.dot(y, caps))
+              - float(y @ caps)
           )
+
+          if abs(float(val) - dual_floor) > 1e-8:
+              raise RuntimeError(
+                  "primal/dual mismatch"
+              )
+
+          active_indices = [
+              i for i, x in enumerate(y)
+              if x > 1e-9
+          ]
+
+          def sha(a):
+              a = np.asarray(
+                  a,
+                  dtype="<f8"
+              )
+              return hashlib.sha256(
+                  a.tobytes()
+              ).hexdigest()
+
+          def breakpoints(a):
+              """
+              Store locations where the discrete
+              slope changes. This is useful for
+              reconstructing piecewise-linear sigma.
+              """
+              a = np.asarray(a)
+              d = np.diff(a)
+
+              if len(d) < 2:
+                  return []
+
+              dd = np.diff(d)
+
+              ids = np.where(
+                  np.abs(dd) > 1e-10
+              )[0] + 1
+
+              out = []
+
+              for i in ids:
+                  out.append({
+                      "index": int(i),
+                      "r": float(r[i]),
+                      "value": float(a[i])
+                  })
+
+              return out
 
           report = {
               "L": L,
               "reference_commit":
                   "94fa51e8f26794ef2d206c6c12e7adb4d85cbeaf",
-              "pilot_floor": float(val),
-              "dual_floor_float": float(dual_floor),
-              "mass_dual_weight": y_mass,
-              "total_rows": int(len(rows)),
-              "active_rows": int(len(active)),
-              "active_signed_rows": int(
-                  sum(x["signed_row"] for x in active)
-              ),
-              "active": active,
+
+              "pilot_floor":
+                  float(val),
+
+              "dual_floor_float":
+                  dual_floor,
+
+              "mass_weight":
+                  y_mass,
+
+              "r_sha256":
+                  sha(r),
+
+              "cost_sha256":
+                  sha(cost),
+
+              "total_rows":
+                  len(rows),
+
+              "active_count":
+                  len(active_indices),
+
+              "active": []
           }
 
+          arrays = {
+              "r": r,
+              "cost": cost
+          }
+
+          print()
+          print("=" * 76)
+          print("ACTIVE ROW TRACE")
+          print("=" * 76)
+
+          for i in active_indices:
+
+              row = rows[i]
+
+              negative = bool(
+                  np.min(row) < -1e-12
+              )
+
+              item = {
+                  "index": int(i),
+
+                  "dual_weight":
+                      float(y[i]),
+
+                  "cap_float":
+                      float(caps[i]),
+
+                  "weighted_cap":
+                      float(y[i] * caps[i]),
+
+                  "signed":
+                      negative,
+
+                  "min":
+                      float(np.min(row)),
+
+                  "max":
+                      float(np.max(row)),
+
+                  "row_sha256":
+                      sha(row),
+
+                  "nonzero_count":
+                      int(np.count_nonzero(
+                          np.abs(row) > 1e-14
+                      )),
+
+                  "breakpoints":
+                      breakpoints(row)
+              }
+
+              report["active"].append(
+                  item
+              )
+
+              arrays[
+                  f"row_{i}"
+              ] = row
+
+              print(
+                  f"{i:4d} "
+                  f"y={y[i]:.12g} "
+                  f"cap={caps[i]:+.12g} "
+                  f"signed={negative} "
+                  f"min={np.min(row):+.6g} "
+                  f"max={np.max(row):+.6g} "
+                  f"sha={sha(row)[:16]}"
+              )
+
+              if negative:
+                  bp = item["breakpoints"]
+
+                  print(
+                      "     breakpoints:",
+                      [
+                          (
+                              round(x["r"], 4),
+                              round(x["value"], 6)
+                          )
+                          for x in bp[:30]
+                      ]
+                  )
+
+          report["active"].sort(
+              key=lambda x:
+                  x["weighted_cap"],
+              reverse=True
+          )
+
           with open(
-              "../../../dual-candidate.json",
+              "../../../active-trace.json",
               "w"
           ) as f:
               json.dump(
@@ -158,157 +259,113 @@ jobs:
                   sort_keys=True
               )
 
-          print()
-          print("=" * 70)
-          print("DUAL CANDIDATE")
-          print("=" * 70)
-
-          print("float pilot floor:",
-                f"{val:+.12f}")
-
-          print("float dual floor:",
-                f"{dual_floor:+.12f}")
-
-          print("mass dual weight:",
-                f"{y_mass:.12g}")
-
-          print("total rows:",
-                len(rows))
-
-          print("active rows:",
-                len(active))
-
-          print(
-              "active signed rows:",
-              sum(x["signed_row"] for x in active)
+          np.savez_compressed(
+              "../../../active-rows.npz",
+              **arrays
           )
-
-          print()
-          print("TOP ACTIVE CAPS")
-          print()
-
-          for x in active[:40]:
-              print(
-                  f"row={x['index']:4d} "
-                  f"y={x['dual_weight']:.10g} "
-                  f"cap={x['cap_float']:+.10g} "
-                  f"y*cap={x['weighted_cap']:+.10g} "
-                  f"signed={x['signed_row']} "
-                  f"range=[{x['row_min']:+.4g},"
-                  f"{x['row_max']:+.4g}]"
-              )
-
-          print()
-          print("=" * 70)
-          print("IMPORTANT")
-          print("=" * 70)
-
-          print(
-              "This is a FLOAT dual candidate."
-          )
-
-          print(
-              "It is NOT a rigorous certificate yet."
-          )
-
-          print(
-              "Next step: rigorous Arb upper bounds "
-              "for active caps and continuous "
-              "minorant verification."
-          )
-          PY
-
-      - name: Check dual consistency
-        run: |
-          python - <<'PY'
-          import json
-
-          with open("dual-candidate.json") as f:
-              d = json.load(f)
-
-          p = d["pilot_floor"]
-          q = d["dual_floor_float"]
-
-          gap = abs(p - q)
-
-          print("primal =", p)
-          print("dual   =", q)
-          print("gap    =", gap)
-
-          if gap > 1e-6:
-              raise SystemExit(
-                  "Primal/dual mismatch too large"
-              )
-
-          if d["active_rows"] <= 0:
-              raise SystemExit(
-                  "No active dual rows found"
-              )
-
-          print("FLOAT DUAL CONSISTENCY: PASS")
-          PY
-
-      - name: Generate certification plan
-        run: |
-          python - <<'PY'
-          import json
-
-          with open("dual-candidate.json") as f:
-              d = json.load(f)
-
-          active = d["active"]
 
           signed = [
-              x for x in active
-              if x["signed_row"]
+              x for x in report["active"]
+              if x["signed"]
           ]
-
-          positive = [
-              x for x in active
-              if not x["signed_row"]
-          ]
-
-          plan = {
-              "positive_rows_for_projected_HS": [
-                  x["index"] for x in positive
-              ],
-              "signed_rows_for_sharp_spectral_bound": [
-                  x["index"] for x in signed
-              ],
-              "positive_count": len(positive),
-              "signed_count": len(signed),
-          }
 
           with open(
-              "certification-plan.json",
+              "../../../signed-trace.json",
               "w"
           ) as f:
               json.dump(
-                  plan,
+                  signed,
                   f,
-                  indent=2
+                  indent=2,
+                  sort_keys=True
               )
 
+          print()
+          print("=" * 76)
+          print("SUMMARY")
+          print("=" * 76)
+
           print(
-              "positive active rows:",
-              len(positive)
+              "pilot:",
+              repr(float(val))
           )
 
           print(
-              "signed active rows:",
+              "dual:",
+              repr(dual_floor)
+          )
+
+          print(
+              "active:",
+              len(active_indices)
+          )
+
+          print(
+              "signed:",
               len(signed)
           )
 
           print(
-              "signed row indices:",
+              "signed indices:",
               [x["index"] for x in signed]
+          )
+
+          expected = {
+              396, 341, 326,
+              374, 375, 316, 222
+          }
+
+          found = {
+              x["index"]
+              for x in signed
+          }
+
+          if found != expected:
+              raise RuntimeError(
+                  f"Signed-row identity changed: "
+                  f"{found} != {expected}"
+              )
+
+          print(
+              "SIGNED ROW IDENTITY: PASS"
+          )
+
+          print()
+          print(
+              "This trace is FLOAT data used "
+              "to identify operators."
+          )
+
+          print(
+              "It is NOT a mathematical "
+              "certificate."
           )
           PY
 
-      - name: Upload dual candidate
+      - name: Verify Arb available
+        run: |
+          python - <<'PY'
+          from flint import arb
+
+          x = arb("0.4")
+
+          print(
+              "Arb:",
+              x.sin()
+          )
+
+          assert x.sin().is_finite()
+
+          print(
+              "ARB READY FOR NEXT STAGE"
+          )
+          PY
+
+      - name: Upload trace
         uses: actions/upload-artifact@v4
         with:
-          name: t1-L040-dual-candidate
+          name: t1-L040-active-trace
           path: |
-            dual-candidate.json
-            certification-plan.json
+            active-trace.json
+            signed-trace.json
+            active-rows.npz
