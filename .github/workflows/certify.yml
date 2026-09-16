@@ -1,4 +1,4 @@
-name: T1 L040 V26.1 Batch Audit Active Caps
+name: T1 L040 V27 Signed-Cap Operator Identity Audit
 
 on:
   workflow_dispatch:
@@ -6,7 +6,7 @@ on:
     branches: [main]
 
 jobs:
-  batch-audit:
+  identity-audit:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
@@ -14,10 +14,12 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12.14"
+
       - name: Install frozen dependencies
         run: |
           python -m pip install --upgrade pip==26.2.1
           pip install numpy==2.5.3 scipy==1.18.1 mpmath==1.4.1
+
       - name: Fetch pinned reference
         run: |
           git clone https://github.com/Kuberwastaken/riemann.git reference-riemann
@@ -25,191 +27,202 @@ jobs:
           git checkout 94fa51e8f26794ef2d206c6c12e7adb4d85cbeaf
           test "$(git rev-parse HEAD)" = "94fa51e8f26794ef2d206c6c12e7adb4d85cbeaf"
 
-      - name: Rebuild all 397 rows and audit V25 identities
+      - name: Audit exact signed-cap operator identities
         working-directory: reference-riemann/experiments/weil_positivity
         run: |
-          cat > v26.py <<'PY'
+          cat > v27.py <<'PY'
           import json,numpy as np
           from scipy.sparse.linalg import eigsh
-          from scipy.linalg import null_space,eigh
-          from itertools import combinations
-          from sharp_floor import Omega,build_operator,LOG2
-          from sigma_lp import sigma_pair_vals,project_constraints
-          from sigma_rich import rich_centers
-          from sigma_t1 import omega_w,S2L2
-          from sigma_t1b import profile_operator,lam_max_profile,clusters_of,tent,solve_lp
+          from sharp_floor import build_operator
+          from sigma_lp import project_constraints
+          from sigma_t1b import profile_operator,tent
 
-          EXPECTED=json.loads(r"""[{"index":0,"kind":"indicator","label":"ind_0.25","cap":2.647378417951656e-06,"R":0.25,"dual_weight":0.8829017274702364,"constraint_slack":0.0,"weighted_cap":2.3373749784769388e-06,"sigma_min":0.0,"sigma_max":1.0},{"index":1,"kind":"indicator","label":"ind_0.50","cap":8.363834567984764e-06,"R":0.5,"dual_weight":1.0223727251524128,"constraint_slack":0.0,"weighted_cap":8.550956339994537e-06,"sigma_min":0.0,"sigma_max":1.0},{"index":2,"kind":"indicator","label":"ind_0.75","cap":2.3501816352530925e-05,"R":0.75,"dual_weight":0.5604513205932424,"constraint_slack":0.0,"weighted_cap":1.3171624011115817e-05,"sigma_min":0.0,"sigma_max":1.0},{"index":3,"kind":"indicator","label":"ind_1.00","cap":6.08390108979766e-05,"R":1.0,"dual_weight":0.27421837071602434,"constraint_slack":0.0,"weighted_cap":1.6683174444417593e-05,"sigma_min":0.0,"sigma_max":1.0},{"index":4,"kind":"indicator","label":"ind_1.25","cap":0.00014244247539590887,"R":1.25,"dual_weight":0.058363017351166335,"constraint_slack":0.0,"weighted_cap":8.313372663074512e-06,"sigma_min":0.0,"sigma_max":1.0},{"index":5,"kind":"indicator","label":"ind_1.50","cap":0.00030212912394028137,"R":1.5,"dual_weight":0.006749241620181427,"constraint_slack":0.0,"weighted_cap":2.0391424579666995e-06,"sigma_min":0.0,"sigma_max":1.0},{"index":6,"kind":"indicator","label":"ind_1.75","cap":0.0005874116911316168,"R":1.75,"dual_weight":0.017712819778089705,"constraint_slack":0.0,"weighted_cap":1.0404717420557224e-05,"sigma_min":0.0,"sigma_max":1.0},{"index":7,"kind":"indicator","label":"ind_2.00","cap":0.0010608384676933707,"R":2.0,"dual_weight":0.004364782382947907,"constraint_slack":0.0,"weighted_cap":4.630329054941477e-06,"sigma_min":0.0,"sigma_max":1.0},{"index":8,"kind":"indicator","label":"ind_2.25","cap":0.0018006577264224107,"R":2.25,"dual_weight":0.013159162905338778,"constraint_slack":0.0,"weighted_cap":2.369514835874945e-05,"sigma_min":0.0,"sigma_max":1.0},{"index":9,"kind":"indicator","label":"ind_2.50","cap":0.002900763004707595,"R":2.5,"dual_weight":0.005476448187993227,"constraint_slack":0.0,"weighted_cap":1.5885878300928698e-05,"sigma_min":0.0,"sigma_max":1.0},{"index":10,"kind":"indicator","label":"ind_2.75","cap":0.004469902362574792,"R":2.75,"dual_weight":0.01710915906798388,"constraint_slack":0.0,"weighted_cap":7.647627053964908e-05,"sigma_min":0.0,"sigma_max":1.0},{"index":11,"kind":"indicator","label":"ind_3.00","cap":0.006630162409997485,"R":3.0,"dual_weight":0.007280196667026534,"constraint_slack":0.0,"weighted_cap":4.82688862791083e-05,"sigma_min":0.0,"sigma_max":1.0},{"index":12,"kind":"indicator","label":"ind_3.25","cap":0.009514765284281126,"R":3.25,"dual_weight":0.022553626353989498,"constraint_slack":0.0,"weighted_cap":0.00021459246106758718,"sigma_min":0.0,"sigma_max":1.0},{"index":13,"kind":"indicator","label":"ind_3.50","cap":0.013265242857504978,"R":3.5,"dual_weight":0.008824756987744264,"constraint_slack":0.0,"weighted_cap":0.00011706254460089175,"sigma_min":0.0,"sigma_max":1.0},{"index":14,"kind":"indicator","label":"ind_3.75","cap":0.018028076310966718,"R":3.75,"dual_weight":0.026975732397034574,"constraint_slack":0.0,"weighted_cap":0.0004863205621979565,"sigma_min":0.0,"sigma_max":1.0},{"index":15,"kind":"indicator","label":"ind_4.00","cap":0.02395090995450208,"R":4.0,"dual_weight":0.009014118913117708,"constraint_slack":0.0,"weighted_cap":0.0002158963504072564,"sigma_min":0.0,"sigma_max":1.0},{"index":16,"kind":"indicator","label":"ind_4.25","cap":0.031178465031888376,"R":4.25,"dual_weight":0.025903663568223045,"constraint_slack":0.0,"weighted_cap":0.0008076364687596431,"sigma_min":0.0,"sigma_max":1.0},{"index":17,"kind":"indicator","label":"ind_4.50","cap":0.03984829161773647,"R":4.5,"dual_weight":0.015849854674492465,"constraint_slack":0.0,"weighted_cap":0.0006315896311679193,"sigma_min":0.0,"sigma_max":1.0},{"index":18,"kind":"indicator","label":"ind_4.75","cap":0.050086504117525195,"R":4.75,"dual_weight":0.016700328687205168,"constraint_slack":0.0,"weighted_cap":0.0008364610815557258,"sigma_min":0.0,"sigma_max":1.0},{"index":22,"kind":"indicator","label":"ind_5.75","cap":0.10862259133238636,"R":5.75,"dual_weight":0.06441061002302795,"constraint_slack":0.0,"weighted_cap":0.0069964473700010734,"sigma_min":0.0,"sigma_max":1.0},{"index":23,"kind":"indicator","label":"ind_6.00","cap":0.12792402238868994,"R":6.0,"dual_weight":0.062200757407794516,"constraint_slack":0.0,"weighted_cap":0.007956971083228178,"sigma_min":0.0,"sigma_max":1.0},{"index":24,"kind":"indicator","label":"ind_6.25","cap":0.14910543990550143,"R":6.25,"dual_weight":0.03745329843688261,"constraint_slack":0.0,"weighted_cap":0.00558449053934341,"sigma_min":0.0,"sigma_max":1.0},{"index":88,"kind":"fejer","label":"fejer_c0_a1.5","cap":6.177275414863223e-05,"center":0.0,"width":1.5,"dual_weight":0.7775304381681456,"constraint_slack":0.0,"weighted_cap":4.803019660003915e-05,"sigma_min":0.0,"sigma_max":1.0},{"index":89,"kind":"fejer","label":"fejer_c0_a3","cap":0.001204836509290278,"center":0.0,"width":3.0,"dual_weight":0.5629581779443117,"constraint_slack":0.0,"weighted_cap":0.0006782725659908398,"sigma_min":0.0,"sigma_max":1.0},{"index":91,"kind":"fejer","label":"fejer_c0.5_a1.5","cap":0.0002757693613358672,"center":0.5,"width":1.5,"dual_weight":0.08345023671170698,"constraint_slack":0.0,"weighted_cap":2.301301848131437e-05,"sigma_min":0.0,"sigma_max":1.3333333333333335},{"index":92,"kind":"fejer","label":"fejer_c0.5_a3","cap":0.0032568153193626645,"center":0.5,"width":3.0,"dual_weight":0.4218857968900543,"constraint_slack":0.0,"weighted_cap":0.0013740041263330543,"sigma_min":0.0,"sigma_max":1.6666666666666667},{"index":95,"kind":"fejer","label":"fejer_c1_a3","cap":0.005973857152022865,"center":1.0,"width":3.0,"dual_weight":0.7276499367967695,"constraint_slack":0.0,"weighted_cap":0.004346876779102367,"sigma_min":0.0,"sigma_max":1.3333333333333335},{"index":98,"kind":"fejer","label":"fejer_c1.5_a3","cap":0.011054094513499696,"center":1.5,"width":3.0,"dual_weight":0.9106520964747705,"constraint_slack":0.0,"weighted_cap":0.010066434343348757,"sigma_min":0.0,"sigma_max":1.0},{"index":100,"kind":"fejer","label":"fejer_c2_a1.5","cap":0.005093827429198673,"center":2.0,"width":1.5,"dual_weight":0.13458392100327268,"constraint_slack":0.0,"weighted_cap":0.0006855472683355777,"sigma_min":0.0,"sigma_max":1.0},{"index":139,"kind":"fejer","label":"fejer_c8.5_a1.5","cap":0.19801784206039402,"center":8.5,"width":1.5,"dual_weight":0.07848060806399426,"constraint_slack":0.0,"weighted_cap":0.015540560652419702,"sigma_min":0.0,"sigma_max":1.0},{"index":142,"kind":"fejer","label":"fejer_c9_a1.5","cap":0.20140773101841358,"center":9.0,"width":1.5,"dual_weight":0.2901874811582933,"constraint_slack":0.0,"weighted_cap":0.0584460021500405,"sigma_min":0.0,"sigma_max":1.0},{"index":196,"kind":"union","label":"r1_union_5","cap":0.24762586873427417,"round":1,"slots":[[9.35,10.200000000000001,0.2414219715296234],[18.1,18.1,0.029861689108960723]],"dual_weight":0.016523266384968482,"constraint_slack":0.0,"weighted_cap":0.00409158819290565,"sigma_min":0.0,"sigma_max":1.0},{"index":198,"kind":"union","label":"r1_union_7","cap":0.16293887046773473,"round":1,"slots":[[8.1,8.1,0.14144591538461584],[18.1,18.1,0.029861689108960723]],"dual_weight":0.04663355123300497,"constraint_slack":0.0,"weighted_cap":0.0075984181638050685,"sigma_min":0.0,"sigma_max":1.0},{"index":222,"kind":"signed_tail","label":"r1_slot1_tail_th0.35","cap":0.0012696678181704265,"round":1,"slot":[8.1,8.1,0.14144591538461584],"theta":0.35,"cut":10.1,"band_cap_R":10.25,"dual_weight":0.09060035054598102,"constraint_slack":0.0,"weighted_cap":0.00011503234940319154,"sigma_min":-0.35,"sigma_max":1.0},{"index":316,"kind":"signed_tail","label":"r2_slot2_tail_th0.2","cap":0.033184100782823724,"round":2,"slot":[7.45,7.5,0.16992381736985185],"theta":0.2,"cut":9.5,"band_cap_R":9.5,"dual_weight":0.02133921495918692,"constraint_slack":0.0,"weighted_cap":0.0007081226598319983,"sigma_min":-0.2,"sigma_max":1.0},{"index":326,"kind":"signed_wide","label":"r2_slot2_wide_th0.2","cap":0.0340466838117841,"round":2,"slot":[7.45,7.5,0.16992381736985185],"theta":0.2,"dual_weight":0.3593393877190819,"constraint_slack":0.0,"weighted_cap":0.012234314514791676,"sigma_min":-0.2,"sigma_max":1.0},{"index":341,"kind":"signed_joint","label":"r2_joint_th1.5","cap":0.052153459324580397,"round":2,"theta":1.5,"slots":[[8.6,10.5,0.25300608551746306],[17.400000000000002,17.45,0.2114071257415284]],"dual_weight":0.4250449361150816,"constraint_slack":0.0,"weighted_cap":0.022167563786796782,"sigma_min":-1.5,"sigma_max":1.0},{"index":374,"kind":"signed_tail","label":"r3_slot1_tail_th2","cap":0.016689842979342586,"round":3,"slot":[18.8,18.85,0.26580565912363135],"theta":2.0,"cut":20.85,"band_cap_R":21.0,"dual_weight":0.11717086391989356,"constraint_slack":0.0,"weighted_cap":0.0019555633205769413,"sigma_min":-2.0,"sigma_max":1.0},{"index":375,"kind":"signed_tail","label":"r3_slot1_tail_th3","cap":0.008404279185219384,"round":3,"slot":[18.8,18.85,0.26580565912363135],"theta":3.0,"cut":20.85,"band_cap_R":21.0,"dual_weight":0.08572955282234601,"constraint_slack":0.0,"weighted_cap":0.0007204950963430083,"sigma_min":-3.0,"sigma_max":1.0},{"index":396,"kind":"signed_joint","label":"r3_joint_th4","cap":0.16719921387534403,"round":3,"theta":4.0,"slots":[[0.0,9.8,0.57542544739058],[18.8,18.85,0.26580565912363135]],"dual_weight":0.1389016438184634,"constraint_slack":0.0,"weighted_cap":0.02322424565244012,"sigma_min":-4.0,"sigma_max":1.0}]""")
-          wanted={int(x["index"]):x for x in EXPECTED}
-          L=.4;N=1200;Rmax=22.;dR=.25;dr=.05
-          thetas=(.1,.2,.35,.5,.75,1.,1.5,2.,3.,4.)
-          u,w,v1,v2,K=build_operator(L,N); nI=len(u)
-          r=np.arange(0.,Rmax+1e-9,dr);cost=np.array([omega_w(x) for x in r])
-          tail=float(Omega(Rmax)-S2L2)
-          rows=[];caps=[];meta=[];band={}
-          def add(sig,cap,kind,label):
-              rows.append(np.asarray(sig,float));caps.append(float(cap))
-              meta.append({"index":len(rows)-1,"kind":kind,"label":label})
-          def bop(R):
-              if R not in band:
-                  KR,_=K(R);band[R]=project_constraints(KR,v1,v2)
-              return band[R]
-          for R in np.arange(dR,Rmax+1e-9,dR):
-              A=bop(round(float(R),6))
-              add((r<=R+1e-12).astype(float),
-                  min(1.,float(np.max(eigsh(A,k=6,which="LA",return_eigenvectors=False)))),
-                  "indicator",f"ind_{R:.2f}")
-          for cc in rich_centers():
-              for a in (1.5,3.,6.):
-                  s=sigma_pair_vals(r,cc,a)
-                  add(s,lam_max_profile(s,r,u,w,v1,v2),"fejer",f"fejer_c{cc:.6g}_a{a:.6g}")
-          for cc in (7.,8.,9.,10.,12.,17.,18.,19.):
-              for sg in (1.,-1.):
-                  s=sigma_pair_vals(r,cc,3.)*(1.+sg*np.cos(r*LOG2))
-                  add(s,lam_max_profile(s,r,u,w,v1,v2),"cos_mod",f"cos_c{cc:g}_sgn{sg:+g}")
-          s=np.clip(1.-r/21.,0.,None)*(1.+np.cos(r*LOG2))
-          add(s,lam_max_profile(s,r,u,w,v1,v2),"cos_taper","cos_taper_plus")
-          s=np.clip(1.-r/21.,0.,None)*(1.-np.cos(r*LOG2))
-          add(s,lam_max_profile(s,r,u,w,v1,v2),"cos_taper","cos_taper_minus")
-          def solve():
-              return solve_lp(r,cost,rows,caps,tail)
-          val,x=solve()
-          for co in (.05,.15,.30,.60):
-              s=np.maximum(co-cost,0.)
-              add(s,lam_max_profile(s,r,u,w,v1,v2),"oracle",f"oracle_{co:g}")
-          val,x=solve()
-          P=np.eye(nI)-np.outer(v1,v1)-np.outer(v2,v2)
-          stalls=0
-          for rd in range(1,15):
-              cl=sorted(clusters_of(x,r),key=lambda t:-t[2])
-              if not cl:break
-              unions=[cl[:k] for k in range(2,len(cl)+1)]+[list(p) for p in combinations(cl[:4],2)]
-              for ui,un in enumerate(unions):
-                  s=np.zeros_like(r)
-                  for lo,hi,m in un:s=np.maximum(s,tent(r,lo,hi))
-                  add(s,lam_max_profile(s,r,u,w,v1,v2),"union",f"r{rd}_union_{ui}")
-              for si,(lo,hi,mass) in enumerate(cl[:4]):
-                  if mass<.05:continue
-                  sb=tent(r,lo,hi);Kb=profile_operator(sb,r,u,w,v1,v2);cut=hi+2.
-                  if cut<Rmax-1.:
-                      Rc=round(float(np.ceil(cut/dR)*dR),6);Bc=bop(Rc)
-                      for th in thetas:
-                          A=Kb-th*(P-Bc)
-                          add(sb-th*(r>cut).astype(float),
-                              float(np.max(eigsh(A,k=6,which="LA",return_eigenvectors=False))),
-                              "signed_tail",f"r{rd}_slot{si}_tail_th{th:g}")
-                  swd=tent(r,max(lo-2.,0.),min(hi+2.,Rmax));Kw=profile_operator(swd,r,u,w,v1,v2)
-                  for th in thetas:
-                      A=Kb-th*(P-Kw)
-                      add(sb-th*(1.-swd),float(np.max(eigsh(A,k=6,which="LA",return_eigenvectors=False))),
-                          "signed_wide",f"r{rd}_slot{si}_wide_th{th:g}")
-              if len(cl)>=2:
-                  (a,b,m1),(c,d,m2)=cl[0],cl[1]
-                  sab=np.maximum(tent(r,a,b),tent(r,c,d));Kab=profile_operator(sab,r,u,w,v1,v2)
-                  wab=np.maximum(tent(r,max(a-2,0),min(b+2,Rmax)),tent(r,max(c-2,0),min(d+2,Rmax)))
+          L=.4;N=1200;Rmax=22.;dr=.05
+          u,w,v1,v2,K=build_operator(L,N)
+          r=np.arange(0.,Rmax+1e-9,dr)
+          P=np.eye(N)-np.outer(v1,v1)-np.outer(v2,v2)
+
+          cases=[
+            {"index":222,"kind":"signed_tail","slot":[8.1,8.1],"theta":.35,
+             "cut":10.1,"R":10.25,"old_cap":0.0012696678181704265},
+            {"index":316,"kind":"signed_tail","slot":[7.45,7.5],"theta":.2,
+             "cut":9.5,"R":9.5,"old_cap":0.033184100782823724},
+            {"index":326,"kind":"signed_wide","slot":[7.45,7.5],"theta":.2,
+             "old_cap":0.0340466838117841},
+            {"index":341,"kind":"signed_joint","slots":[[8.6,10.5],[17.4,17.45]],
+             "theta":1.5,"old_cap":0.052153459324580397},
+            {"index":374,"kind":"signed_tail","slot":[18.8,18.85],"theta":2.,
+             "cut":20.85,"R":21.0,"old_cap":0.016689842979342586},
+            {"index":375,"kind":"signed_tail","slot":[18.8,18.85],"theta":3.,
+             "cut":20.85,"R":21.0,"old_cap":0.008404279185219384},
+            {"index":396,"kind":"signed_joint","slots":[[0.,9.8],[18.8,18.85]],
+             "theta":4.,"old_cap":0.16719921387534403},
+          ]
+
+          def top(A):
+              return float(np.max(eigsh((A+A.T)/2,k=6,which="LA",
+                                        return_eigenvectors=False)))
+          def bandop(R):
+              KR,_=K(R);return project_constraints(KR,v1,v2)
+
+          out=[]
+          for c in cases:
+              th=c["theta"]
+              if c["kind"]=="signed_tail":
+                  lo,hi=c["slot"]; sb=tent(r,lo,hi)
+                  Kb=profile_operator(sb,r,u,w,v1,v2)
+                  B=bandop(c["R"])
+                  constructed=Kb-th*(P-B)
+                  sampled=sb-th*(r>c["cut"]).astype(float)
+              elif c["kind"]=="signed_wide":
+                  lo,hi=c["slot"]; sb=tent(r,lo,hi)
+                  Kb=profile_operator(sb,r,u,w,v1,v2)
+                  sw=tent(r,max(lo-2.,0.),min(hi+2.,Rmax))
+                  Kw=profile_operator(sw,r,u,w,v1,v2)
+                  constructed=Kb-th*(P-Kw)
+                  sampled=sb-th*(1.-sw)
+              else:
+                  (a,b),(cc,d)=c["slots"]
+                  sab=np.maximum(tent(r,a,b),tent(r,cc,d))
+                  Kab=profile_operator(sab,r,u,w,v1,v2)
+                  wab=np.maximum(tent(r,max(a-2,0.),min(b+2,Rmax)),
+                                 tent(r,max(cc-2,0.),min(d+2,Rmax)))
                   Kw=profile_operator(wab,r,u,w,v1,v2)
-                  for th in thetas:
-                      A=Kab-th*(P-Kw)
-                      add(sab-th*(1.-wab),float(np.max(eigsh(A,k=6,which="LA",return_eigenvectors=False))),
-                          "signed_joint",f"r{rd}_joint_th{th:g}")
-              val2,x2=solve();stalls=stalls+1 if abs(val2-val)<1e-4 else 0
-              val,x=val2,x2
-              if stalls>=3 or val>=.03:break
+                  constructed=Kab-th*(P-Kw)
+                  sampled=sab-th*(1.-wab)
 
-          if len(rows)!=397:raise RuntimeError(f"dictionary drift {len(rows)}")
-          if set(wanted)!=set(x["index"] for x in EXPECTED):raise RuntimeError("active set malformed")
+              direct=profile_operator(sampled,r,u,w,v1,v2)
+              D=direct-constructed
 
-          V=np.column_stack([v1,v2]);Q=null_space(V.T)
-          eps=np.finfo(float).eps
-          results=[]; weighted_total=0.
-          for j in sorted(wanted):
-              exp=wanted[j]
-              if meta[j]["kind"]!=exp["kind"] or meta[j]["label"]!=exp["label"]:
-                  raise RuntimeError(f"identity drift row {j}")
-              if abs(caps[j]-float(exp["cap"]))>2e-10:
-                  raise RuntimeError(f"cap drift row {j}")
-              C=profile_operator(rows[j],r,u,w,v1,v2)
-              A=Q.T@C@Q;A=(A+A.T)/2
-              lam=float(eigh(A,eigvals_only=True,subset_by_index=[A.shape[0]-1,A.shape[0]-1])[0])
+              # Core identity diagnosis:
+              # profile_operator(1) need not equal P for the finite r-truncated
+              # numerical kernel. The signed constructions explicitly use P,
+              # so the discrepancy should be explained by th*(P-K_1).
+              ones=np.ones_like(r)
+              K1=profile_operator(ones,r,u,w,v1,v2)
+              predicted=th*(P-K1)
+              resid=D-predicted
 
-              # V26 is deliberately an AUDIT/PLANNING bound, not ValidCap.
-              # Give each row a conservative finite spectral cushion 1e-4.
-              finite=1e-4
+              rec=dict(c)
+              rec.update({
+                "constructed_lambda":top(constructed),
+                "direct_sampled_lambda":top(direct),
+                "matrix_discrepancy_norm2":float(np.linalg.norm(D,2)),
+                "P_minus_K1_norm2":float(np.linalg.norm(P-K1,2)),
+                "predicted_discrepancy_norm2":float(np.linalg.norm(predicted,2)),
+                "identity_residual_norm2":float(np.linalg.norm(resid,2)),
+                "old_cap_error":abs(top(constructed)-c["old_cap"])
+              })
+              out.append(rec)
 
-              # Re-derive a generic r-trapezoid bound for piecewise-linear
-              # interpolation of the sampled profile. This applies only when
-              # the intended continuum sigma is exactly that interpolation.
-              slopes=np.diff(rows[j])/np.diff(r)
-              xmax=float(u[-1]-u[0]); integ=0.
-              for k in range(len(r)-1):
-                  h=float(r[k+1]-r[k]);cp=abs(float(slopes[k]))
-                  cm=max(abs(float(rows[j][k])),abs(float(rows[j][k+1])))
-                  integ+=h**3/12*(2*cp*xmax+cm*xmax*xmax)
-              sw=np.sqrt(w)
-              rerr=integ/np.pi*float(np.max(sw))*float(np.sum(sw))
-
-              # Reuse V17 only as a planning allowance, not a proof that its
-              # row-326 operator perturbation constant is uniform in sigma.
-              uplan=1.7962225841646505e-6
-              inflation=finite+rerr+uplan
-              y=float(exp["dual_weight"]);weighted=y*inflation
-              weighted_total+=weighted
-              results.append({"index":j,"kind":exp["kind"],"label":exp["label"],
-                 "y":y,"old_cap":float(exp["cap"]),"lambda_rebuilt":lam,
-                 "finite_cushion":finite,"r_quadrature_bound":rerr,
-                 "u_projector_planning_allowance":uplan,
-                 "planning_cap_inflation":inflation,
-                 "weighted_planning_cost":weighted,
-                 "validcap_certified":False})
-
-          out={"active_count":len(results),"pilot_floor":float(val),
-               "weighted_planning_inflation":weighted_total,
-               "rows":results,
-               "status":"BATCH_NUMERICAL_AUDIT_COMPLETE_NOT_VALIDCAP"}
-          open("../../../v26-batch-audit.json","w").write(json.dumps(out,indent=2))
-          print(json.dumps(out,indent=2))
+          report={"cases":out,
+            "hypothesis":
+              "signed cap construction uses the exact complement operator P minus a positive band/window operator; naive sampled sigma replaces P by the finite-r numerical profile of 1",
+            "max_identity_residual":max(x["identity_residual_norm2"] for x in out),
+            "max_old_cap_error":max(x["old_cap_error"] for x in out)}
+          open("../../../v27-identities.json","w").write(json.dumps(report,indent=2))
+          print(json.dumps(report,indent=2))
+          if report["max_identity_residual"]>1e-10:
+              raise RuntimeError("proposed signed-cap identity does not explain discrepancy")
+          if report["max_old_cap_error"]>2e-10:
+              raise RuntimeError("constructed cap drift")
+          print("SIGNED-CAP OPERATOR IDENTITY AUDIT: PASS")
           PY
-          python v26.py
+          python v27.py
 
-      - name: Classify proof obligations
-        run: |
-          python - <<'PY'
-          import json,collections
-          d=json.load(open("v26-batch-audit.json"))
-          by=collections.defaultdict(list)
-          for x in d["rows"]:by[x["kind"]].append(x["index"])
-          out={"families":dict(by),
-               "active_count":d["active_count"],
-               "weighted_planning_inflation":d["weighted_planning_inflation"],
-               "critical_warning":
-                 "V17 row326 u/projector bound has not yet been proved uniform over all active sigma profiles.",
-               "next_proof_tasks":[
-                 "derive a sigma-dependent or uniform continuum u-discretization/projector theorem",
-                 "certify each finite lambda upper bound with rigorous arithmetic",
-                 "prove each active sigma continuum definition matches the sampled/interpolated profile",
-                 "certify off-grid dual pointwise feasibility",
-                 "close Parseval and integrability hypotheses in Lean"
-               ]}
-          open("v26-proof-obligations.json","w").write(json.dumps(out,indent=2))
-          print(json.dumps(out,indent=2))
-          PY
-
-      - name: Fail-closed decision
+      - name: Derive family theorem obligations
         run: |
           python - <<'PY'
           import json
-          d=json.load(open("v26-batch-audit.json"))
-          out={"T1_certified":False,"all_ValidCap_certified":False,
-               "status":"40_ACTIVE_CAPS_REBUILT_AND_COSTED",
-               "weighted_planning_inflation":d["weighted_planning_inflation"],
-               "reason":"batch numerical margins are not yet continuum ValidCap theorems"}
-          open("v26-decision.json","w").write(json.dumps(out,indent=2))
+          d=json.load(open("v27-identities.json"))
+          out={
+            "identity_audit_pass":d["max_identity_residual"]<1e-10,
+            "families":{
+              "indicator":{
+                "representation":"exact band operator K_R projected to pole-constraint complement",
+                "continuum_task":"bound u-discretization/projector error for K_R directly; no r-trapezoid surrogate needed"
+              },
+              "fejer_union":{
+                "representation":"profile integral operator for an explicitly piecewise-linear sigma",
+                "continuum_task":"r-quadrature plus general u/projector perturbation theorem"
+              },
+              "signed_tail":{
+                "representation":"K_band_profile - theta*(P-K_R)",
+                "continuum_task":"combine certified bounds for band profile, exact complement projector, and indicator K_R"
+              },
+              "signed_wide":{
+                "representation":"K_band_profile - theta*(P-K_wide)",
+                "continuum_task":"combine certified profile bounds with exact complement projector; row326 is this family"
+              },
+              "signed_joint":{
+                "representation":"K_joint_profile - theta*(P-K_wide_joint)",
+                "continuum_task":"same algebraic theorem as signed_wide with union profiles"
+              }
+            },
+            "critical_rule":
+              "do not replace P by profile_operator(ones,r-grid); signed caps are algebraic operator constructions, not naive finite-r sampled profiles",
+            "next_stage":
+              "derive one compositional ValidCap theorem from certified primitive operators, then instantiate it for all 40 active caps"
+          }
+          open("v27-family-theorems.json","w").write(json.dumps(out,indent=2))
+          print(json.dumps(out,indent=2))
+          PY
+
+      - name: Fail-closed V27 verdict
+        run: |
+          python - <<'PY'
+          import json
+          d=json.load(open("v27-identities.json"))
+          out={
+            "T1_certified":False,
+            "all_ValidCap_certified":False,
+            "operator_identity_explained":bool(d["max_identity_residual"]<1e-10),
+            "status":"SIGNED_CAP_ALGEBRA_IDENTIFIED",
+            "next_requirement":
+              "prove and numerically certify primitive-operator continuum bounds, then compose them with these exact identities"
+          }
+          open("v27-verdict.json","w").write(json.dumps(out,indent=2))
           print(json.dumps(out,indent=2))
           PY
 
       - name: Write ledger
         run: |
-          cat > V26-LEDGER.txt <<'EOF'
-          V26.1 — BATCH AUDIT OF THE 40 ACTIVE CAPS
+          cat > V27-LEDGER.txt <<'EOF'
+          V27 — SIGNED-CAP OPERATOR IDENTITY AUDIT
 
-          V26.1 rebuilds the complete 397-row dictionary from the pinned sour
+          Goal:
+          explain why naive profile_operator(sigma) in V26.1 does not reproduce
+          the caps for signed_tail, signed_wide and signed_joint rows.
+
+          The construction uses algebraic operators containing P, the exact
+          finite-grid projector onto the pole-constraint complement.
+
+          A naive sampled profile of the constant function 1 instead produces
+          a finite-r truncated numerical integral operator K_1. These are not
+          interchangeable.
+
+          V27 tests whether the full discrepancy is exactly theta*(P-K_1).
+          If so, the signed caps must be certified compositionally from their
+          primitive operator pieces rather than by treating the stored sampled
+          sigma array as a standalone finite-r profile.
+
+          This is a theorem-discovery/audit stage. It remains fail-closed:
+          T1_certified=false and all_ValidCap_certified=false.
+
+          NO RH PROOF CLAIM IS MADE.
+          EOF
+
+      - name: Hash and upload V27 evidence
+        run: |
+          sha256sum v27-identities.json v27-family-theorems.json v27-verdict.json V27-LEDGER.txt > V27-MANIFEST.sha256
+          sha256sum -c V27-MANIFEST.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: t1-L040-v27-operator-identities
+          path: |
+            v27-identities.json
+            v27-family-theorems.json
+            v27-verdict.json
+            V27-LEDGER.txt
+            V27-MANIFEST.sha256
